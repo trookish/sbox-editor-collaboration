@@ -1,8 +1,8 @@
 {
-  "Title": "Editor Collaboration",
+  "Title": "s&box Editor Collaboration",
   "Type": "library",
   "Org": "cyn",
-  "Ident": "editor_collaboration",
+  "Ident": "sbox_editor_collab",
   "Schema": 1,
   "IncludeSourceFiles": false,
   "Resources": null,

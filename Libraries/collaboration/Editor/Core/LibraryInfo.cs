@@ -4,7 +4,7 @@ public static class LibraryInfo
 {
     public const string LibraryVersion = "1.2.0";
 
-    /// <summary>The ident this workspace's own descriptor (Libraries/collaboration/collaboration.sbproj) carries.</summary>
+    /// <summary>The ident this workspace's descriptor carried before it was renamed to the published one. Kept so that a copy made from the older descriptor is still recognised.</summary>
     public const string LibraryIdent = "editor_collaboration";
 
     /// <summary>The ident the package was published under on Asset Party. A name is permanent once published, and the Library Manager installs the library into a project under it, so a project that installed the library from Asset Party holds this ident, not <see cref="LibraryIdent"/>.</summary>
