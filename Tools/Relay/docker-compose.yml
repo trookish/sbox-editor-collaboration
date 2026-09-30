@@ -1,0 +1,40 @@
+# Relay + automatic HTTPS. Run from Tools/Relay on the server:
+#
+#   cp .env.example .env      # then fill in the two values
+#   docker compose up -d --build
+#
+# The relay itself publishes NO port; only Caddy is reachable from the internet, on 80 and 443. Caddy obtains and
+# renews the certificate by itself, so the DNS name in RELAY_HOST must already point at this server.
+
+services:
+  relay:
+    build:
+      context: ../..
+      dockerfile: Tools/Relay/Dockerfile
+    restart: unless-stopped
+    environment:
+      # Refuses to start when unset, so the relay can never come up open to anyone who finds it.
+      RELAY_ACCESS_KEYS: ${RELAY_ACCESS_KEYS:?Set RELAY_ACCESS_KEYS in .env}
+      # Safe here because the only thing that can reach the relay is Caddy, which sets X-Forwarded-For.
+      RELAY_TRUST_FORWARDED_FOR: "true"
+    expose:
+      - "8080"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - relay
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      RELAY_HOST: ${RELAY_HOST:?Set RELAY_HOST in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

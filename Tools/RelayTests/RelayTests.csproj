@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>14</LangVersion>
+    <Nullable>disable</Nullable>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <Compile Include="*.cs" />
+    <!-- The engine-free library core, exactly as CoreTests compiles it. -->
+    <Compile Include="../../Libraries/collaboration/Editor/Core/*.cs" Link="Core/%(Filename)%(Extension)" />
+    <!-- The relay server sources, compiled in rather than referenced so the tests host it in-process. -->
+    <Compile Include="../Relay/RelayServer.cs" Link="Relay/RelayServer.cs" />
+    <Compile Include="../Relay/RelayOptions.cs" Link="Relay/RelayOptions.cs" />
+  </ItemGroup>
+
+</Project>

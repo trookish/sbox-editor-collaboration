@@ -1,0 +1,54 @@
+# This file describes files and paths that should not be tracked by Git version control
+# https://git-scm.com/docs/gitignore
+#
+# This repository contains the collaboration library and its tooling and nothing else.
+# The s&box test project this library was developed in (Assets, Code, ProjectSettings,
+# the project's .sbproj) shares the folder for development but is not published, so the
+# top level below is a whitelist: only the library, Tools/, and this repository's own
+# files are ever added. Local session data, the relay access key, editor caches and
+# build output can therefore never enter the repository by accident.
+
+# Top level: track only the library, its tooling, and the repository's own files.
+/*
+!/Libraries
+!/Tools
+!/README.md
+!/PUBLISHING.md
+!/LICENSE
+!/.gitignore
+
+# Auto-generated code editor files (at any depth)
+.vs/
+.vscode/
+obj/
+bin/
+Properties/
+*.csproj
+!Tools/**/*.csproj
+*launchSettings.json
+*.sln
+*.slnx
+
+# Auto-generated asset related files (at any depth)
+.sbox/
+*.generated.*
+*.*_c
+!*.shader_c
+*.los
+*.vpk
+
+# Session data, local secrets and disposable test copies (at any depth)
+.collaboration/
+.research/
+TestResults/
+Exports/
+
+# Relay deployment secrets (the access key). Only .env.example is tracked.
+Tools/Relay/.env
+
+# Cloudflare Worker relay: dependencies, local dev state and local secrets. Only the
+# source, the config and the lock file are tracked.
+Tools/RelayWorker/node_modules/
+Tools/RelayWorker/.wrangler/
+Tools/RelayWorker/tmp/
+Tools/RelayWorker/.dev.vars

@@ -1,0 +1,9 @@
+# Used by `docker build -f Tools/Relay/Dockerfile .` so the build context is the relay and two library files,
+# not the whole workspace (scenes, journals, disposable test copies, build output).
+*
+!Tools/Relay/**
+!Libraries/collaboration/Editor/Core/RelayProtocol.cs
+!Libraries/collaboration/Editor/Core/InviteCode.cs
+Tools/Relay/bin
+Tools/Relay/obj
+Tools/Relay/.env

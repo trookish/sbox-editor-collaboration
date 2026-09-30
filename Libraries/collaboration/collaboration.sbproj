@@ -1,0 +1,14 @@
+{
+  "Title": "Editor Collaboration",
+  "Type": "library",
+  "Org": "cyn",
+  "Ident": "editor_collaboration",
+  "Schema": 1,
+  "IncludeSourceFiles": false,
+  "Resources": null,
+  "PackageReferences": [],
+  "EditorReferences": null,
+  "Mounts": null,
+  "IsStandaloneOnly": false,
+  "Metadata": {}
+}

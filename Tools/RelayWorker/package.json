@@ -1,0 +1,14 @@
+{
+	"name": "collab-relay-worker",
+	"private": true,
+	"type": "module",
+	"description": "Free, serverless relay for the s&box collaboration library. Deploy once; every install shares it.",
+	"scripts": {
+		"dev": "wrangler dev --local --port 8787",
+		"deploy": "node deploy.js",
+		"test": "node test/worker.test.mjs"
+	},
+	"devDependencies": {
+		"wrangler": "^4.144.0"
+	}
+}

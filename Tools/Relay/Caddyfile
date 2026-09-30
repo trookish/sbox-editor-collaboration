@@ -1,0 +1,4 @@
+{$RELAY_HOST} {
+	# WebSocket upgrades are forwarded without extra configuration.
+	reverse_proxy relay:8080
+}

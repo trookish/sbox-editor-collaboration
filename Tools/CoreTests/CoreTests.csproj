@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><TargetFramework>net10.0</TargetFramework><OutputType>Exe</OutputType><ImplicitUsings>enable</ImplicitUsings><LangVersion>14</LangVersion></PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../Libraries/collaboration/Editor/Core/*.cs" Link="Core/%(Filename)%(Extension)" />
+    <!-- The Connect layer is engine-independent socket code with no Sandbox or Editor
+         dependency, so its pure parts (discovery pruning, STUN parsing, the UPnP document
+         builders, endpoint ordering) are compiled here and unit-tested like Core. -->
+    <Compile Include="../../Libraries/collaboration/Editor/Connect/*.cs" Link="Connect/%(Filename)%(Extension)" />
+  </ItemGroup>
+</Project>

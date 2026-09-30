@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>14</LangVersion>
+    <RootNamespace>TeamCreate.Relay</RootNamespace>
+    <AssemblyName>TeamCreate.Relay</AssemblyName>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="*.cs" />
+    <!-- The wire contract is shared with the editor library rather than copied, so a change to the
+         handshake cannot leave the server speaking a dialect the library no longer sends. -->
+    <Compile Include="../../Libraries/collaboration/Editor/Core/RelayProtocol.cs" Link="Shared/RelayProtocol.cs" />
+    <Compile Include="../../Libraries/collaboration/Editor/Core/InviteCode.cs" Link="Shared/InviteCode.cs" />
+  </ItemGroup>
+
+</Project>
