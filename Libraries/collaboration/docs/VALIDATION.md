@@ -314,6 +314,40 @@ Negative control run and observed: reverting the manifest's use of `MetaFileRule
 
 ---
 
+## 2026-09-30 — Repository, icon and publish preparation
+
+The library now has its own public repository: **github.com/trookish/sbox-editor-collaboration** (MIT).
+
+### Repository shape
+
+The repository holds the library and its tooling only: `Libraries/collaboration/`, `Tools/`, plus `README.md`, `PUBLISHING.md`, `LICENSE` and a whitelist `.gitignore`. The s&box test project this library is developed in (Assets, Code, ProjectSettings, the project's `.sbproj`) is **not** part of it, and the top-level rule `/*` with explicit `!` re-inclusions means nothing else can enter by accident.
+
+Verified after the first commit, by reading GitHub's API back: **108 files**, every path inside the whitelist, `truncated: false`, no `.env`, no `node_modules`, no `.dev.vars`, no `launchSettings`, no test-copies, no session journals. The staged diff was content-scanned for the username, the previous raw public IP, key filenames paired with values, and token patterns — only documentation *naming* `relay-access-key.txt` as a path matched, never a value. Local `git status` clean after the push.
+
+`.gitignore` rules that previously applied only at the project level (`obj`, `bin`, `*.csproj`, `Properties/`) now apply at any depth, because the library's own `Editor/obj` and generated `.csproj` would otherwise follow the folder into a clone. `Tools/**/*.csproj` stays re-included: the gates need it.
+
+### Gates (after every change in this pass)
+
+| Gate | Result |
+| --- | --- |
+| `dotnet run --project Tools/CoreTests/CoreTests.csproj` | **974 passed**, exit 0 |
+| `dotnet build Tools/Compile/Compile.csproj -v q --nologo --no-incremental` | **0 Warning(s), 0 Error(s)** |
+| `dotnet run --project Tools/RelayTests/RelayTests.csproj` | **44 relay tests passed**, exit 0 |
+
+### Defects found and fixed while preparing the repository
+
+- **The gates could not run from a clean clone.** CoreTests located the workspace by walking up to `ProjectSettings/collaboration.json`, which a library-only checkout does not have; run from such a checkout the suite died with *"the workspace root is found from the test binary"*. The failing run was captured first (negative control), then the walk was changed to find the library's own `VERSION` file. The project-settings version check is now conditional on that file existing — and proven still armed: with `ProjectSettings/collaboration.json` present but its `LibraryVersion` tampered to `9.9.9`, the suite failed with the named message, and passed again after the file was restored byte-identical (SHA-256 compared). Library-only checkout after the fix: **974 passed**.
+- **Personal data in files that would become public.** The raw public IP `94.49.37.128` appeared in this document and as a test fixture (4 occurrences in CoreTests). Replaced with the documentation-range address `203.0.113.42`; a re-scan of the whole library and tooling tree found zero remaining occurrences. Kept by design: the reserved synthetic identity `76561202255233023` (a fake account the tests vouch for) and SHA-256 hashes of public s&box assemblies.
+
+### Icon and publish preparation
+
+The supplied artwork is stored once at `Libraries/collaboration/docs/icon.png` (950,690 bytes, verified byte-identical to the source) and shown at the top of the repository README and of the library README. `PUBLISHING.md` is the release checklist — deploy the shared relay (step 1, because `DefaultUrl` is still empty), run the three gates, bump `VERSION` / `.version` / `LibraryInfo.LibraryVersion`, publish through Library Manager, finish the package page on sbox.game with that icon as the thumbnail, set the state to Released.
+
+### What was executed, and what was not
+
+- **Executed:** `git init`, staged-set inspection, content scan, first commit, `gh repo create trookish/sbox-editor-collaboration --public`, push, and the API read-back described above.
+- **Not executed:** the s&box package upload itself (Library Manager → Publish Project) — it needs a signed-in editor and is the maintainer's manual step, described in `PUBLISHING.md`. No Cloudflare deploy in this pass either; `RelayDefaults.DefaultUrl` remains empty until `npm run deploy` is run.
+
 ## 2026-09-29 — Reconstruction note
 
 The `Libraries/collaboration/` folder, and with it this document, was accidentally deleted on 2026-09-29. The text above was reconstructed afterwards from the evidence that survived the deletion: the task specifications under `.hermes/tasks/` and the overhaul plan under `.hermes/plans/`; the full-file reads of this document kept in the session record, replayed against the exact unified diffs produced by every later patch to it; and the `file_size` and `total_lines` those reads reported, used as checkpoints.
