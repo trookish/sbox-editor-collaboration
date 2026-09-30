@@ -200,7 +200,8 @@ public sealed class ReadinessCard : DockCard
         string text = config?.LibraryIdent;
         if (string.IsNullOrWhiteSpace(text))
         {
-            return null;
+            // A project with no settings file yet still knows which package to fetch: the published one under its own organization.
+            return LibraryInfo.DefaultLibraryIdent(config?.Org);
         }
         if (text.Contains('.'))
         {

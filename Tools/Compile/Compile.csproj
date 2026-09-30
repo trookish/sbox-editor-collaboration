@@ -9,7 +9,23 @@
   <ItemGroup>
     <Compile Include="../../Libraries/collaboration/Editor/**/*.cs"
              Exclude="../../Libraries/collaboration/Editor/obj/**/*.cs;../../Libraries/collaboration/Editor/bin/**/*.cs" />
-    <Reference Include="$(SboxRoot)/bin/managed/*.dll" />
+    <!-- Exactly the assemblies the editor itself gives a library's Editor project (copied from its generated editor_collaboration.editor.csproj),
+         not every DLL in bin/managed: that folder also holds assemblies such as Sandbox.Menu.dll which editor code cannot see, and a wildcard let code that
+         uses them pass this gate and then fail to compile in the editor. -->
+    <Reference Include="$(SboxRoot)/bin/managed/Sandbox.System.dll" />
+    <Reference Include="$(SboxRoot)/bin/managed/Sandbox.Engine.dll" />
+    <Reference Include="$(SboxRoot)/bin/managed/Sandbox.Filesystem.dll" />
+    <Reference Include="$(SboxRoot)/bin/managed/Sandbox.Reflection.dll" />
+    <Reference Include="$(SboxRoot)/bin/managed/Sandbox.Mounting.dll" />
+    <Reference Include="$(SboxRoot)/bin/managed/Microsoft.AspNetCore.Components.dll" />
+    <Reference Include="$(SboxRoot)/bin/managed/Sandbox.AppSystem.dll" />
+    <Reference Include="$(SboxRoot)/bin/managed/Sandbox.Tools.dll" />
+    <Reference Include="$(SboxRoot)/bin/managed/Sandbox.Compiling.dll" />
+    <Reference Include="$(SboxRoot)/bin/managed/Microsoft.CodeAnalysis.dll" />
+    <Reference Include="$(SboxRoot)/bin/managed/Microsoft.CodeAnalysis.CSharp.dll" />
+    <Reference Include="$(SboxRoot)/bin/managed/Sandbox.Bind.dll" />
+    <Reference Include="$(SboxRoot)/bin/managed/Facepunch.ActionGraphs.dll" />
+    <Reference Include="$(SboxRoot)/bin/managed/SkiaSharp.dll" />
     <ProjectReference Include="$(SboxRoot)/addons/tools/Code/Base Editor Library.csproj" />
   </ItemGroup>
 </Project>

@@ -97,6 +97,8 @@ public sealed class CollaborationDock : Widget
 
     private ConnectCard connect;
 
+    private RelayCard relay;
+
     private OrgRosterCard orgRoster;
 
     private SessionRosterCard sessionRoster;
@@ -125,7 +127,7 @@ public sealed class CollaborationDock : Widget
 
     private int layoutReflowCount;
 
-    private bool Built => statusDetail != null && readiness != null && connect != null && orgRoster != null && sessionRoster != null && controls != null && soloTest != null && aboutToggle != null && aboutBody != null && scroller != null && content != null && scroller.Canvas == content && readiness.Complete && connect.Complete && orgRoster.Complete && sessionRoster.Complete && controls.Complete && soloTest.Complete;
+    private bool Built => statusDetail != null && readiness != null && connect != null && relay != null && orgRoster != null && sessionRoster != null && controls != null && soloTest != null && aboutToggle != null && aboutBody != null && scroller != null && content != null && scroller.Canvas == content && readiness.Complete && connect.Complete && relay.Complete && orgRoster.Complete && sessionRoster.Complete && controls.Complete && soloTest.Complete;
 
     public CollaborationDock(Widget parent)
         : base(parent)
@@ -167,6 +169,7 @@ public sealed class CollaborationDock : Widget
         }
         readiness = layout.Add(new ReadinessCard(content));
         connect = layout.Add(new ConnectCard(content));
+        relay = layout.Add(new RelayCard(content));
         orgRoster = layout.Add(new OrgRosterCard(content));
         sessionRoster = layout.Add(new SessionRosterCard(content));
         controls = layout.Add(new ControlsCard(content, connect));
@@ -300,6 +303,7 @@ public sealed class CollaborationDock : Widget
         DockTheme.SetText(statusDetail, current.Status);
         readiness.Refresh();
         connect.Refresh();
+        relay.Refresh();
         orgRoster.Refresh();
         sessionRoster.Refresh();
         controls.Refresh();
@@ -479,6 +483,7 @@ public sealed class CollaborationDock : Widget
     {
         yield return (Name: "readiness", Card: readiness);
         yield return (Name: "connect", Card: connect);
+        yield return (Name: "relay", Card: relay);
         yield return (Name: "orgRoster", Card: orgRoster);
         yield return (Name: "sessionRoster", Card: sessionRoster);
         yield return (Name: "controls", Card: controls);

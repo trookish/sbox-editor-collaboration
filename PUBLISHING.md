@@ -6,7 +6,13 @@ The checklist for releasing the library so that other people can install it. Eve
 
 ### 1. Deploy the shared relay
 
-The library connects two editors over the internet through a relay. The address every installation uses by default is compiled into `Libraries/collaboration/Editor/Core/RelayDefaults.cs` (`DefaultUrl`), and it is **empty until you deploy**, which means a fresh install can only host sessions on one network.
+The library connects two editors over the internet through a relay. The address every installation uses by default is compiled into `Libraries/collaboration/Editor/Core/RelayDefaults.cs` (`DefaultUrl`), and it is **empty until a relay is deployed**, which means a fresh install can only host sessions on one network.
+
+Either deploy from the editor or from a terminal; both put the same Worker on the same free plan.
+
+**From the editor (no tools needed).** Open the Collaboration dock in a project and use the **Relay** card: *1. Open Cloudflare to create a token*, copy the token, then *2. Set up relay from the clipboard*. When the card says *Relay ready*, read the address from `.collaboration/relay-url.txt` in that project and set `RelayDefaults.DefaultUrl` to it in `Libraries/collaboration/Editor/Core/RelayDefaults.cs`. Delete the token afterwards at dash.cloudflare.com/profile/api-tokens.
+
+**From a terminal.**
 
 ```bash
 cd Tools/RelayWorker
@@ -46,7 +52,7 @@ A consuming project also pins the version in its `ProjectSettings/collaboration.
 
 1. Open the project that contains the library in the s&box editor.
 2. Open **Library Manager** (View menu) and select the `editor_collaboration` library.
-3. Choose **Publish Project** (right-click or the publish action in the library's detail view). The package is uploaded under the organization `cyn` with the ident `editor_collaboration` - idents are lowercase and dotted, and the name is permanent once published.
+3. Choose **Publish Project** (right-click or the publish action in the library's detail view). The package is uploaded under the organization `cyn`. The package page on Asset Party carries the ident `sbox_editor_collab`, so a project that installs it holds `Libraries/cyn.sbox_editor_collab` - idents are lowercase and dotted, and the name is permanent once published. The readiness check recognises that name, the workspace descriptor's `editor_collaboration`, and whatever `LibraryIdent` the project's settings file names.
 4. Finish the package page on **sbox.game**: title, description, tags - and the **thumbnail**. Use the repository icon, `Libraries/collaboration/docs/icon.png` (square PNG, 1254x1254): it is the same artwork shown at the top of this repository's README.
 5. Set the package's publish state to **Released** and save. Until then the package exists but is not visible to anyone outside your organization.
 
@@ -54,11 +60,11 @@ Packages stay private to their organization unless explicitly released, so a fir
 
 ## After publishing
 
-Users install the library the standard way: in their project's **Library Manager**, add `cyn.editor_collaboration`. The project settings file that the library creates on first use names the ident and the version:
+Users install the library the standard way: in their project's **Library Manager**, add `cyn.sbox_editor_collab`. The project settings file that the library creates on first use names the ident and the version:
 
 ```json
 {
-  "LibraryIdent": "cyn.editor_collaboration",
+  "LibraryIdent": "cyn.sbox_editor_collab",
   "LibraryVersion": "1.2.0"
 }
 ```

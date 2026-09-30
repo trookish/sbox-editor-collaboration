@@ -6395,6 +6395,25 @@ Assert( RelayProtocol.IsTerminal( RelayProtocol.LoopbackCode ) && !RelayProtocol
     }
 }
 
+// ---- An installed copy of the library is recognised under every ident it can carry ---------------------------------------------------------
+// Installing from Asset Party puts the library into a project as Libraries/<org>.<ident> under the PUBLISHED ident, which differs from the ident
+// in this workspace's own descriptor. Matching only the configured ident reported "Library installation required" with the library installed.
+{
+    Assert( LibraryInfo.PublishedIdent == "sbox_editor_collab", "the published ident is the name Asset Party lists the package under" );
+    Assert( LibraryInfo.DefaultLibraryIdent( "cyn" ) == "cyn." + LibraryInfo.PublishedIdent, "a new project's settings name the published package, not the workspace descriptor's name" );
+    Assert( LibraryInfo.DefaultLibraryIdent( " " ) is null && LibraryInfo.DefaultLibraryIdent( null ) is null, "no organization gives no default ident" );
+    Assert( LibraryInfo.IdentPart( "cyn.sbox_editor_collab" ) == "sbox_editor_collab" && LibraryInfo.IdentPart( "bare" ) == "bare" && LibraryInfo.IdentPart( "  " ) is null && LibraryInfo.IdentPart( null ) is null, "IdentPart drops the organization and keeps a bare name" );
+    Assert( LibraryInfo.IsThisLibrary( "cyn.editor_collaboration", "sbox_editor_collab" ), "the Asset Party install is found even though the settings file names the older ident" );
+    Assert( LibraryInfo.IsThisLibrary( "cyn.sbox_editor_collab", "cyn.sbox_editor_collab" ), "the install is found when the settings file names the published ident" );
+    Assert( LibraryInfo.IsThisLibrary( "cyn.editor_collaboration", "local.editor_collaboration" ), "the workspace's own descriptor is still recognised" );
+    Assert( LibraryInfo.IsThisLibrary( null, "cyn.sbox_editor_collab" ), "a project with no configured ident still finds the published install" );
+    Assert( LibraryInfo.IsThisLibrary( "cyn.custom_name", "acme.custom_name" ), "a project that names its own ident still finds a library installed under it" );
+    Assert( !LibraryInfo.IsThisLibrary( "cyn.editor_collaboration", "facepunch.actiongraph" ), "an unrelated library is not mistaken for this one" );
+    Assert( !LibraryInfo.IsThisLibrary( "cyn.editor_collaboration", null ) && !LibraryInfo.IsThisLibrary( "cyn.editor_collaboration", "" ), "an entry with no ident is never this library" );
+    Assert( sessionSource.Contains( "LibraryInfo.IsThisLibrary(" ) && !sessionSource.Contains( "item.Version?.ToString()" ),
+        "the readiness check goes through LibraryInfo.IsThisLibrary and never compares Asset Party's build number (1.0.<build>) with the release version" );
+}
+
 // ---- The first Host click writes the shared settings file itself ----------------------------------------------------------------------------
 {
     var setupTemp = Path.Combine( Environment.GetEnvironmentVariable( "TMPDIR" ) is { Length: > 0 } t4 ? t4 : Path.GetTempPath(), "teamcreate-setup", Guid.NewGuid().ToString( "N" ) );
@@ -6516,10 +6535,190 @@ Assert( HashOf( MetaFileRules.Canonical( "a.scene.meta", Utf8( "\uFEFF{\"guid\":
 
 
 // ---- A host with no relay is told plainly what that means ------------------------------------------------------------------------------------
-Assert( RelayDefaults.NoRelayNotice( effectiveRelay: null, configured: null ) is { } none && none.Contains( "same network" ) && none.Contains( "Tools/RelayWorker" ), "with no relay at all the host is told friends on other networks cannot join, and where to set one up" );
-Assert( RelayDefaults.NoRelayNotice( effectiveRelay: null, configured: "off" ) is { } off && off.Contains( "turned off" ) && !off.Contains( "Tools/RelayWorker" ), "a project that turned relaying off is told so, not told to set one up" );
+Assert( RelayDefaults.NoRelayNotice( effectiveRelay: null, configured: null ) is { } none && none.Contains( "same network" ) && none.Contains( "Set up relay" ), "with no relay at all the host is told friends on other networks cannot join, and where to set one up" );
+Assert( RelayDefaults.NoRelayNotice( effectiveRelay: null, configured: "off" ) is { } off && off.Contains( "turned off" ) && !off.Contains( "Set up relay" ), "a project that turned relaying off is told so, not told to set one up" );
 Assert( RelayDefaults.NoRelayNotice( effectiveRelay: "wss://x.example.com/relay", configured: null ) == null, "with a relay in use there is nothing to warn about" );
 Assert( RelayDefaults.NoRelayNotice( effectiveRelay: "ws://localhost:8080/relay", configured: "ws://localhost:8080/relay" ) is { } local && local.Contains( "this computer" ), "a relay on localhost is called out as reachable only from this computer, because that is exactly what made a friend's join fail" );
+
+
+// ---- Set up the relay from the dock: the token, the deploy, and what the card says -----------------------------------------------------------
+// A person with no command-line tools presses a button, creates one Cloudflare token, and the editor deploys the relay itself. The token is a credential, so
+// the checks below cover what may be sent to Cloudflare and where, what a failure says, and that nothing it echoes back carries the token.
+{
+    var rsToken = "cfut_TestTokenAbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+    bool Accepts( string text ) => CloudflareApi.TryAcceptToken( text, out _, out _ );
+
+    Assert( CloudflareApi.TryAcceptToken( "  " + rsToken + "\r\n", out var rsAccepted, out var rsNoProblem ) && rsAccepted == rsToken && rsNoProblem == null, "a token on the clipboard is accepted, with surrounding whitespace removed" );
+    Assert( Accepts( "aB3dE6gH9jK2mN5pQ8sT1vW4yZ7cF0hJ3kL6nP9r" ) && Accepts( "cfat_" + new string( 'a', 40 ) ), "a legacy mixed-case token and a token with a known prefix are accepted" );
+    Assert( !Accepts( null ) && !Accepts( "" ) && !Accepts( "   " ) && !Accepts( "abc" ), "an empty, blank or far too short clipboard is refused" );
+
+    var rsInvite = InviteCode.Encode( new InviteData { Port = 27845, ProjectId = Guid.NewGuid().ToString(), Secret = System.Security.Cryptography.RandomNumberGenerator.GetBytes( 16 ), Endpoints = new List<byte[]>() } );
+    Assert( !CloudflareApi.TryAcceptToken( rsInvite, out var rsLeaked, out var rsInviteProblem ) && rsLeaked == null && rsInviteProblem.Contains( "Nothing was sent" ),
+        "an invite code on the clipboard is refused before anything is sent, because it carries the session's encryption secret" );
+    // The all-one-case rule also refuses an uppercase invite code, so the decode guard is only what stops a MIXED-case one: pasted from a chat that capitalised
+    // it, or typed by hand. The message is what tells the two apart.
+    var rsMixed = rsInvite.Replace( "-", "" ).Substring( 0, 12 ).ToLowerInvariant() + rsInvite.Replace( "-", "" ).Substring( 12 );
+    Assert( InviteCode.TryDecode( rsMixed, out _, out _ ) && !CloudflareApi.TryAcceptToken( rsMixed, out _, out var rsMixedProblem ) && rsMixedProblem.Contains( "invite code" ),
+        "a mixed-case invite code, which only the decode guard can recognise, is refused as an invite code" );
+    Assert( !Accepts( new string( 'a', 32 ) + new string( '7', 32 ) ) && !Accepts( "ABCDEFGHJKMNPQRSTVWXYZ0123456789ABCDEF" ), "a hexadecimal key or any all-one-case string (a hash, a relay access key, an invite-like code) is refused" );
+    Assert( !Accepts( "https://dash.cloudflare.com/profile/api-tokens" ) && !Accepts( rsToken + "\n" + rsToken ) && !Accepts( rsToken + " extra" ), "a web address, several lines, or extra words are refused" );
+
+    var rsPage = new Uri( CloudflareApi.TokenPageUrl() );
+    var rsQuery = System.Web.HttpUtility.ParseQueryString( rsPage.Query );
+    var rsPermissions = JsonNode.Parse( rsQuery["permissionGroupKeys"] )!.AsArray();
+    Assert( rsPage.Host == "dash.cloudflare.com" && rsPage.AbsolutePath == "/profile/api-tokens" && rsPermissions.Count == 2
+        && rsPermissions.Any( x => x!["key"]!.GetValue<string>() == "workers_scripts" && x["type"]!.GetValue<string>() == "edit" )
+        && rsPermissions.Any( x => x!["key"]!.GetValue<string>() == "account_settings" && x["type"]!.GetValue<string>() == "read" ),
+        "the token page asks for exactly two permissions, editing Workers scripts and reading the account, and nothing that reaches DNS or billing" );
+    Assert( CloudflareApi.HealthUrlFor( "wss://a.workers.dev/relay" ) == "https://a.workers.dev/health" && CloudflareApi.HealthUrlFor( "ws://localhost:8080/relay" ) == "http://localhost:8080/health" && CloudflareApi.HealthUrlFor( "nonsense" ) == null,
+        "the health address is derived from the relay's own address" );
+
+    // ---- the whole deploy, against a stand-in served over real HTTP -------------------------------------------------------------------------
+    var rsDelays = new List<TimeSpan>();
+    Task RsNoWait( TimeSpan span, CancellationToken token ) { rsDelays.Add( span ); return Task.CompletedTask; }
+    RelayDeployer RsDeployer( FakeCloudflare fake, Func<CloudflareRequest, bool> block = null, params string[] names )
+    {
+        var queue = new Queue<string>( names.Length == 0 ? new[] { "collab-abc" } : names );
+        return new RelayDeployer( new RewritingTransport( fake.Port, block ), RelayWorkerSource.Text, host => fake.HealthUrl( host ), RsNoWait, () => queue.Count > 0 ? queue.Dequeue() : "collab-zzz" );
+    }
+    string RsRoute( FakeCloudflare.Call call ) => call.Method + " " + ( call.Path.StartsWith( "/client/v4" ) ? call.Path.Substring( "/client/v4".Length ) : call.Path );
+
+    // First setup on an account with no workers.dev name: the name is refused once as taken, then registered; the relay is uploaded and its address waited on.
+    {
+        using var fake = new FakeCloudflare { Subdomain = null, HealthFailuresBeforeOk = 2 };
+        fake.TakenNames.Add( "collab-abc" );
+        var progress = new List<string>();
+        var result = await RsDeployer( fake, null, "collab-abc", "collab-def" ).RunAsync( fake.Token, progress.Add, CancellationToken.None );
+        var api = fake.Calls.Where( c => !c.Path.StartsWith( "/health" ) ).Select( RsRoute ).ToList();
+        Assert( result.Ok && result.Error == null && result.RelayUrl == "wss://collab-relay.collab-def.workers.dev/relay", "a first setup succeeds and reports the relay's wss address" );
+        Assert( string.Join( "|", api ) == string.Join( "|", new[]
+            {
+                "GET /accounts?per_page=50", "GET /accounts/acct-1/workers/subdomain", "PUT /accounts/acct-1/workers/subdomain", "PUT /accounts/acct-1/workers/subdomain",
+                "GET /accounts/acct-1/workers/services/collab-relay", "PUT /accounts/acct-1/workers/scripts/collab-relay?excludeScript=true&bindings_inherit=strict", "POST /accounts/acct-1/workers/scripts/collab-relay/subdomain"
+            } ), "the calls go in Wrangler's order: account, workers.dev name (retried when taken), existing relay, upload, address on" );
+        Assert( fake.Calls.Where( c => c.Path.StartsWith( "/client/v4" ) ).All( c => c.Authorization == "Bearer " + fake.Token ), "every call to Cloudflare carries the token as a bearer credential" );
+        Assert( fake.Calls.Where( c => c.Path.StartsWith( "/health" ) ).All( c => c.Authorization == null ) && fake.Calls.Count( c => c.Path.StartsWith( "/health" ) ) == 3 && rsDelays.Count == 2,
+            "the token is never sent to the relay's own address, and the health check is repeated until it answers (two failures, then success)" );
+        Assert( fake.Calls.Where( c => c.Path.EndsWith( "/subdomain" ) && c.Method == "POST" ).All( c => c.ScriptApiDate == CloudflareApi.ScriptApiDate ) && fake.Calls.Where( c => !( c.Method == "POST" && c.Path.EndsWith( "/subdomain" ) ) ).All( c => c.ScriptApiDate == null ),
+            "only the per-script address switch selects Cloudflare's current API shape, as Wrangler does" );
+        Assert( fake.UploadedParts.TryGetValue( "index.js", out var module ) && module.FileName == "index.js" && module.ContentType == "application/javascript+module" && module.Body == RelayWorkerSource.Text,
+            "the uploaded module is the embedded relay source, byte for byte, as a JavaScript module" );
+        var meta = fake.UploadedMetadata;
+        Assert( meta != null && meta["main_module"]!.GetValue<string>() == "index.js" && meta["compatibility_date"]!.GetValue<string>() == CloudflareApi.CompatibilityDate
+            && meta["bindings"]![0]!["type"]!.GetValue<string>() == "durable_object_namespace" && meta["bindings"]![0]!["name"]!.GetValue<string>() == "ROOMS" && meta["bindings"]![0]!["class_name"]!.GetValue<string>() == "Room",
+            "the metadata names the module, the compatibility date and the Durable Object binding the relay needs" );
+        Assert( meta!["migrations"]!["new_tag"]!.GetValue<string>() == "v1" && meta["migrations"]!["steps"]![0]!["new_sqlite_classes"]![0]!.GetValue<string>() == "Room" && meta["keep_bindings"] == null,
+            "a first setup carries the one-time SQLite Durable Object migration (the only kind the free plan allows) and has no secrets to keep" );
+        Assert( fake.HealthAnswerHost == "collab-relay.collab-def.workers.dev" && progress.First().StartsWith( "Step 1 of 6" ) && progress.Last().StartsWith( "Step 6 of 6" ) && progress.Count >= 7,
+            "the address that is checked is the new relay's, and progress is reported from step 1 to step 6" );
+    }
+
+    // Setup again on an account that already has the relay: it is updated in place, the migration is not repeated, and an access key the owner set survives.
+    {
+        using var fake = new FakeCloudflare { ExistingTag = "v1" };
+        var result = await RsDeployer( fake ).RunAsync( fake.Token, null, CancellationToken.None );
+        Assert( result.Ok && result.RelayUrl == "wss://collab-relay.tester.workers.dev/relay", "setting up again on an account that has the relay succeeds and reports its address" );
+        Assert( fake.UploadedMetadata!["migrations"] == null && fake.UploadedMetadata["keep_bindings"] is JsonArray rsKept && rsKept.Select( x => x!.GetValue<string>() ).SequenceEqual( new[] { "secret_text", "secret_key" } ),
+            "an update carries no migration and keeps the owner's secrets, so an access key set with `wrangler secret put` is not wiped" );
+        Assert( fake.Calls.Count( c => c.Method == "PUT" && c.Path.EndsWith( "/workers/subdomain" ) ) == 0, "an account that already has a workers.dev name is not asked to register one" );
+    }
+    {
+        using var fake = new FakeCloudflare { ExistingTag = "v0" };
+        await RsDeployer( fake ).RunAsync( fake.Token, null, CancellationToken.None );
+        Assert( fake.UploadedMetadata!["migrations"]!["new_tag"]!.GetValue<string>() == "v1", "a relay on an older migration tag is brought forward to the current one" );
+    }
+
+    // Failures: each says what happened and what to do, stops before doing anything further, and never carries the token.
+    {
+        using var fake = new FakeCloudflare();
+        var result = await RsDeployer( fake ).RunAsync( "cfut_WrongTokenAbCdEfGhIjKlMnOpQrStUvWxYz012345", null, CancellationToken.None );
+        Assert( !result.Ok && result.RelayUrl == null && result.Error.Contains( "refused the token" ) && result.Error.Contains( "Open Cloudflare" ) && fake.Calls.Count == 1,
+            "a token Cloudflare refuses stops at the first call with a sentence naming the fix; nothing is uploaded" );
+    }
+    {
+        using var fake = new FakeCloudflare();
+        var result = await RsDeployer( fake, _ => true ).RunAsync( fake.Token, null, CancellationToken.None );
+        Assert( !result.Ok && result.Error.Contains( "could not be reached" ) && result.Error.Contains( "internet" ) && fake.Calls.Count == 0, "no connection is reported as such, with the next action" );
+    }
+    {
+        using var fake = new FakeCloudflare { HealthFailuresBeforeOk = 1000 };
+        rsDelays.Clear();
+        var result = await RsDeployer( fake ).RunAsync( fake.Token, null, CancellationToken.None );
+        Assert( !result.Ok && result.RelayUrl == null && result.Error.Contains( "did not answer" ) && result.Error.Contains( "not in use" ) && fake.Calls.Count( c => c.Path.StartsWith( "/health" ) ) == 10 && rsDelays.Count == 9,
+            "a relay that never answers is reported as not in use after ten checks, and the address is never handed back to be saved" );
+    }
+    {
+        using var fake = new FakeCloudflare { HealthService = "some-other-site" };
+        var result = await RsDeployer( fake ).RunAsync( fake.Token, null, CancellationToken.None );
+        Assert( !result.Ok && result.RelayUrl == null && result.Error.Contains( "did not answer" ) && fake.Calls.Count( c => c.Path.StartsWith( "/health" ) ) == 10,
+            "an address that answers as a different service is not accepted as the relay, so a stranger's site at that name is never saved" );
+    }
+    {
+        using var fake = new FakeCloudflare { FailUploadWithStatus = 400, EchoTokenInErrors = true };
+        var result = await RsDeployer( fake ).RunAsync( fake.Token, null, CancellationToken.None );
+        Assert( !result.Ok && result.Error.Contains( "uploading the relay" ) && !result.Error.Contains( fake.Token ) && result.Error.Contains( "[token]" ), "when Cloudflare echoes the token back in an error, the message shows a placeholder instead" );
+    }
+    {
+        using var fake = new FakeCloudflare { FailUploadWithStatus = 500 };
+        var result = await RsDeployer( fake ).RunAsync( fake.Token, null, CancellationToken.None );
+        Assert( !result.Ok && result.Error.Contains( "problem of its own" ) && result.Error.Contains( "few minutes" ), "a Cloudflare outage is reported as Cloudflare's, with a time to retry" );
+    }
+    {
+        using var fake = new FakeCloudflare();
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+        var early = await RsDeployer( fake ).RunAsync( fake.Token, null, cancelled.Token );
+        Assert( early.Cancelled && !early.Ok && fake.Calls.Count == 0, "a setup cancelled before it starts sends nothing" );
+        using var midway = new CancellationTokenSource();
+        var later = await RsDeployer( fake ).RunAsync( fake.Token, message => { if ( message.StartsWith( "Step 3" ) ) midway.Cancel(); }, midway.Token );
+        Assert( later.Cancelled && !later.Ok && later.Error.Contains( "Nothing was changed on this computer" ) && !fake.Calls.Any( c => c.Method == "PUT" && c.Path.Contains( "/workers/scripts/" ) ),
+            "cancelling part-way stops before the upload and says that nothing was changed on this computer" );
+    }
+
+    // ---- the embedded source is the real one ------------------------------------------------------------------------------------------------
+    var rsWorkerFile = Path.Combine( versionRoot, "Tools", "RelayWorker", "src", "index.js" );
+    if ( File.Exists( rsWorkerFile ) )
+    {
+        string Normal( string text ) => text.Replace( "\r\n", "\n" ).TrimEnd( '\n' );
+        Assert( Normal( File.ReadAllText( rsWorkerFile ) ) == Normal( RelayWorkerSource.Text ), "the relay source embedded in the library equals Tools/RelayWorker/src/index.js (run `npm run embed` in Tools/RelayWorker after changing the Worker)" );
+    }
+    Assert( RelayWorkerSource.Text.Contains( "export class Room" ) && RelayWorkerSource.Text.Contains( "collab-relay" ), "the embedded source is the relay Worker" );
+
+    // ---- the per-computer relay address ---------------------------------------------------------------------------------------------------
+    Assert( LocalRelayFile.Parse( LocalRelayFile.Format( "wss://collab-relay.tester.workers.dev/relay" ), out var rsFileError ) == "wss://collab-relay.tester.workers.dev/relay" && rsFileError == null, "the address written to the local file reads back" );
+    Assert( LocalRelayFile.Parse( "# comment\n\n  wss://a.example.com/relay  \n", out _ ) == "wss://a.example.com/relay" && LocalRelayFile.Parse( "", out var rsEmptyError ) == null && rsEmptyError == null && LocalRelayFile.Parse( null, out _ ) == null,
+        "comments and blank lines are skipped, and an empty file simply means nothing is set" );
+    Assert( LocalRelayFile.Parse( "http://x.example.com/relay", out var rsBadError ) == null && rsBadError != null && rsBadError.Contains( "relay-url.txt" ), "an unusable address is reported by file name and not used" );
+
+    // ---- what the relay card shows ---------------------------------------------------------------------------------------------------------
+    const string RsShared = "wss://shared.workers.dev/relay";
+    const string RsOwn = "wss://collab-relay.mine.workers.dev/relay";
+    RelaySetupView Describe( string project = null, string local = null, string builtIn = null, bool working = false, string progress = null, DeployResult last = null ) =>
+        RelaySetupRules.Describe( new RelaySetupInput( project, local, builtIn, working, progress, last ) );
+    var rsMissing = Describe();
+    Assert( rsMissing.Mode == RelaySetupMode.Missing && rsMissing.ShowOpen && rsMissing.ShowSetup && !rsMissing.ShowCancel && !rsMissing.IsProblem && rsMissing.Text.Contains( "No relay is set up" ) && rsMissing.Text.Contains( "clipboard" ),
+        "with no relay at all the card offers both buttons and explains the two steps" );
+    var rsSharedView = Describe( builtIn: RsShared );
+    Assert( rsSharedView.Mode == RelaySetupMode.Shared && !rsSharedView.ShowOpen && !rsSharedView.ShowSetup && rsSharedView.Text.Contains( "shared.workers.dev" ), "with the library's shared relay there is nothing to set up, and the card names it" );
+    Assert( Describe( local: RsOwn, builtIn: RsShared ).Mode == RelaySetupMode.Own && Describe( project: "wss://proj.example.com/relay", local: RsOwn, builtIn: RsShared ).Mode == RelaySetupMode.Project,
+        "a relay set up on this computer outranks the shared one, and the project's own setting outranks both" );
+    Assert( RelaySetupRules.Fallback( RsOwn, RsShared ) == RsOwn && RelaySetupRules.Fallback( null, RsShared ) == RsShared && RelaySetupRules.Fallback( "  ", RsShared ) == RsShared && RelaySetupRules.Fallback( null, null ) == null,
+        "the session and the card pick the same fallback relay" );
+    var rsOff = Describe( project: "off", local: RsOwn, builtIn: RsShared );
+    Assert( rsOff.Mode == RelaySetupMode.Off && !rsOff.ShowSetup && !rsOff.ShowOpen, "a project that turned relaying off is told so, and not offered a setup that would be ignored" );
+    var rsLocalProject = Describe( project: "ws://localhost:8080/relay" );
+    var rsLocalFile = Describe( local: "ws://localhost:8080/relay" );
+    Assert( rsLocalProject.Mode == RelaySetupMode.LocalOnly && rsLocalProject.IsProblem && !rsLocalProject.ShowSetup && rsLocalFile.Mode == RelaySetupMode.LocalOnly && rsLocalFile.ShowSetup && rsLocalFile.Text.Contains( "only this computer" ),
+        "a relay on this computer is called a problem; the setup is offered only when this computer's own file, not the project's, is the cause" );
+    var rsWorking = Describe( working: true, progress: "Step 4 of 6: uploading the relay…", builtIn: RsShared );
+    Assert( rsWorking.Mode == RelaySetupMode.Working && rsWorking.ShowCancel && !rsWorking.ShowSetup && !rsWorking.ShowOpen && rsWorking.Text.StartsWith( "Step 4 of 6" ), "while a setup runs the card shows its progress and offers only Cancel" );
+    var rsFailed = Describe( last: new DeployResult( false, null, "Cloudflare refused the token while finding the account." ) );
+    Assert( rsFailed.Mode == RelaySetupMode.Failed && rsFailed.IsProblem && rsFailed.ShowOpen && rsFailed.ShowSetup && rsFailed.Text.StartsWith( "Cloudflare refused the token" ), "a failed setup with no relay in use shows the reason and offers to try again" );
+    Assert( Describe( builtIn: RsShared, last: new DeployResult( false, null, "x" ) ).Mode == RelaySetupMode.Shared, "a failed attempt does not hide a relay that is working" );
+    Assert( Describe( last: new DeployResult( false, null, "Setup was cancelled.", Cancelled: true ) ) is { Mode: RelaySetupMode.Missing, IsProblem: false } rsCancelled && rsCancelled.Text.Contains( "cancelled" ), "a cancelled setup is not shown as an error" );
+    var rsDone = Describe( local: RsOwn, last: new DeployResult( true, RsOwn, null ) );
+    Assert( rsDone.Mode == RelaySetupMode.Done && rsDone.Text.StartsWith( "Relay ready" ) && rsDone.Text.Contains( "mine.workers.dev" ) && !rsDone.ShowSetup, "a finished setup says the relay is ready and names it" );
+}
 
 Console.WriteLine($"{passed} tests passed");
 

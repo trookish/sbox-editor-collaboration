@@ -147,8 +147,11 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
     /// <summary>The relay this session uses: the project's own if it names one, none if it says "off", otherwise the one built into the library.</summary>
     private string EffectiveRelayUrl()
     {
-        return RelayDefaults.Resolve(sessionConfig?.RelayUrl, RelayDefaults.DefaultUrl);
+        return RelayDefaults.Resolve(sessionConfig?.RelayUrl, RelaySetupRules.Fallback(RelaySetup.LocalRelay, RelayDefaults.DefaultUrl));
     }
+
+    /// <summary>What the project's own settings say about the relay (an address, "off", or nothing), for the Relay card.</summary>
+    public string ConfiguredRelayUrl => sessionConfig?.RelayUrl;
 
     private byte[] activeSecret;
 
@@ -2203,27 +2206,18 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
 
     private static (bool Installed, Version Version) InstalledLibrary(CollaborationConfig config)
     {
-        string b = IdentPart(config?.LibraryIdent) ?? "editor_collaboration";
         foreach (LibraryProject item in LibrarySystem.All)
         {
-            if (!string.Equals(IdentPart(item.Project?.Config?.Ident), b, StringComparison.Ordinal))
+            if (!LibraryInfo.IsThisLibrary(config?.LibraryIdent, item.Project?.Config?.Ident))
             {
                 continue;
             }
-            Version.TryParse(item.Version?.ToString(), out Version result);
+            // Asset Party stamps its own build number into the installed copy's .version file (1.0.<build number>), so item.Version is a build id and can
+            // never be compared with the release version the handshake and the settings file use. The code running here is the installed copy.
+            Version.TryParse(LibraryInfo.LibraryVersion, out Version result);
             return (Installed: true, Version: result);
         }
         return (Installed: false, Version: null);
-    }
-
-    private static string IdentPart(string fullIdent)
-    {
-        if (string.IsNullOrWhiteSpace(fullIdent))
-        {
-            return null;
-        }
-        int num = fullIdent.LastIndexOf('.');
-        return (num < 0) ? fullIdent : fullIdent.Substring(num + 1);
     }
 
     private void PollPackageFetch()

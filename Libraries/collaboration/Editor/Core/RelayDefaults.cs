@@ -33,7 +33,7 @@ public static class RelayDefaults
         {
             return "Relaying is turned off for this project (RelayUrl is \"off\"), so friends can join only from your network or through a port you forward.";
         }
-        return "No relay is set up, so friends can join only from the same network or through a port you forward. To let friends anywhere join, deploy the relay once (Tools/RelayWorker, `npm run deploy`).";
+        return "No relay is set up, so friends can join only from the same network or through a port you forward. To let friends anywhere join, press Set up relay in the Relay card.";
     }
 
     /// <summary>The relay to use: the project's own if it names one, nothing if it says "off", otherwise the built-in one.</summary>

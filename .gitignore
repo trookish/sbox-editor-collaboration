@@ -52,3 +52,5 @@ Tools/RelayWorker/node_modules/
 Tools/RelayWorker/.wrangler/
 Tools/RelayWorker/tmp/
 Tools/RelayWorker/.dev.vars
+# Recorded by test/capture-wrangler.mjs on each run: a stand-in token and the bundled Worker. Generated, never committed.
+Tools/RelayWorker/test/wrangler-capture.json

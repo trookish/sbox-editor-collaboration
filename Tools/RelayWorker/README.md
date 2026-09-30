@@ -6,6 +6,10 @@ The relay that lets two friends anywhere in the world join the same session with
 
 ## Deploy it once
 
+The editor can do this itself: the **Relay** card in the Collaboration dock opens Cloudflare's token page, reads the token from the clipboard and deploys this Worker (the copy embedded in `Libraries/collaboration/Editor/Core/RelayWorkerSource.cs`) to the person's own account. The steps below do the same from a terminal.
+
+After changing `src/index.js`, run `npm run embed` so the editor's copy matches; the library's test suite fails when they differ.
+
 ```bash
 cd Tools/RelayWorker
 npm install
@@ -33,6 +37,7 @@ The Worker also caps a room at 16 guests, a message at 16 KiB, and a connection 
 ## Tests
 
 ```bash
+npm run contract            # records a real `wrangler deploy` against a local stand-in and checks the editor's deploy sends the same calls (19 checks)
 npm run dev                # terminal 1: the real Cloudflare runtime, locally, on :8787
 npm test                   # terminal 2: 18 checks with plain WebSocket clients
 dotnet run --project ../RelayTests -- worker ws://localhost:8787/relay      # 24 checks with the library's own client code

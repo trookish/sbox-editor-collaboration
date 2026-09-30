@@ -21,7 +21,7 @@ That is the whole setup. The library carries a shared relay address, so a friend
 - You are **Steam friends** and members of the **same s&box organization**.
 - Your copies of the project are **identical** (the host refuses a friend whose files differ, and says so). Send the friend the project the first time, and after that share changes the way you normally do.
 
-**Not there yet?** The shared relay is deployed once by the library's maintainer (`cd Tools/RelayWorker && npm install && npm run deploy`, free Cloudflare account, about two minutes). Until that has happened `RelayDefaults.DefaultUrl` is empty; the host then sees *"No relay is set up…"* in the dock, and friends can join only on the same network or through a forwarded port.
+**No relay yet?** The Relay card in the dock says so and sets one up from inside the editor, with nothing to install and no need to close it: press **1. Open Cloudflare to create a token** (a free account is enough; the page opens with only the two permissions the relay needs already chosen), copy the token it shows, then press **2. Set up relay from the clipboard**. The relay is put on your own Cloudflare account, its address is remembered on this computer, and the token is used once, never saved, and removed from the clipboard afterwards. The library's maintainer can instead publish one shared relay inside the library (`RelayDefaults.DefaultUrl`), so that nobody has to do this. Until a relay exists, friends can join only on the same network or through a forwarded port.
 
 **Want to try it alone first?** Use the **Try it alone** card (see [below](#try-it-alone-the-one-click-solo-test)).
 
@@ -34,7 +34,7 @@ That is the whole setup. The library carries a shared relay address, so a friend
    {
      "ProjectId": "2e9f8f81-8b38-4207-ad3e-4e7c0bea567f",
      "Org": "cyn",
-     "LibraryIdent": "cyn.editor_collaboration",
+     "LibraryIdent": "cyn.sbox_editor_collab",
      "LibraryVersion": "1.2.0",
      "RequireSteamFriend": true,
      "RequireOrgMember": true,
@@ -124,7 +124,7 @@ Because a relay could otherwise replay, reorder or drop frames without breaking 
 
 **Route order for a joiner:** LAN discovery, then the relay named in the code, then the direct addresses in the code, then Advanced. The dock shows which route carried the join (*"Connected through the relay (relay.example.com)"*, *"Connected on the local network"*), and when every route fails it lists each attempt with its reason and the next step, instead of a single raw socket error. A wrong invite secret is reported as terminal and is not retried; a dropped connection is retried by Recover & reconnect through the same list of routes.
 
-**Setup: usually none.** The library uses its own shared relay address (`RelayDefaults.DefaultUrl`) unless a project names another in `RelayUrl` or sets it to `\"off\"`. The shared relay is a Cloudflare Worker (`Tools/RelayWorker`), deployed once with `npm run deploy`. To run your own instead, use the .NET relay (`Tools/Relay/README.md`) or deploy your own copy of the Worker, then:
+**Setup: usually none.** The library uses its own shared relay address (`RelayDefaults.DefaultUrl`) unless a project names another in `RelayUrl` or sets it to `\"off\"`. The shared relay is a Cloudflare Worker (`Tools/RelayWorker`), deployed once with `npm run deploy`. To run your own instead, use the .NET relay (`Tools/Relay/README.md`) or deploy your own copy of the Worker, then: A relay you set up with the dock's button is used before the shared one and after one named in the project's settings; it is stored in `.collaboration/relay-url.txt`, which Git ignores, because the shared settings file is part of the project manifest and an address written there would make your project differ from your friend's. The invite code carries the relay's address, so the friend needs nothing.
 
 1. Commit `"RelayUrl": "wss://your-relay-hostname/relay"` in `ProjectSettings/collaboration.json`.
 2. On the **host's** machine only, put the relay's access key on one line in `.collaboration/relay-access-key.txt` (untracked; never commit it). Guests need nothing but the invite code.

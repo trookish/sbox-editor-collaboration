@@ -6,7 +6,9 @@
 	"scripts": {
 		"dev": "wrangler dev --local --port 8787",
 		"deploy": "node deploy.js",
-		"test": "node test/worker.test.mjs"
+		"embed": "node embed.js",
+		"test": "node test/worker.test.mjs",
+		"contract": "node test/capture-wrangler.mjs && node test/contract.test.mjs"
 	},
 	"devDependencies": {
 		"wrangler": "^4.144.0"

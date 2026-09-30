@@ -348,6 +348,22 @@ The supplied artwork is stored once at `Libraries/collaboration/docs/icon.png` (
 - **Executed:** `git init`, staged-set inspection, content scan, first commit, `gh repo create trookish/sbox-editor-collaboration --public`, push, and the API read-back described above.
 - **Not executed:** the s&box package upload itself (Library Manager → Publish Project) — it needs a signed-in editor and is the maintainer's manual step, described in `PUBLISHING.md`. No Cloudflare deploy in this pass either; `RelayDefaults.DefaultUrl` remains empty until `npm run deploy` is run.
 
+## 2026-09-30 — Installed copy reported as "Library installation required"
+
+**Symptom.** In a second project (`collab_test`, organization `testcollablib`) that installed the library from Asset Party through the Library Manager, the dock's readiness list showed the red row "Library installation required" while the Library Manager listed the package as Installed.
+
+**Cause.** Two identifiers disagree. The workspace descriptor (`Libraries/collaboration/collaboration.sbproj`) says `editor_collaboration`, but the package was published as `sbox_editor_collab`, and the Library Manager installs it as `Libraries/cyn.sbox_editor_collab`. `InstalledLibrary` compared the installed package's ident with the ident named by the project's `collaboration.json` (default `editor_collaboration`), so an installed copy under the published name never matched. A second, latent defect sat next to it: the installed version was read from `LibraryProject.Version`, which is the build number Asset Party writes into `.version` (`1.0.<build>`), so even a match would have compared a build id with the release version and reported "Library update required".
+
+**Change.**
+- `LibraryInfo.PublishedIdent` (`sbox_editor_collab`), `LibraryInfo.IdentPart` and `LibraryInfo.IsThisLibrary`: an installed library counts when its ident equals the configured ident, the published ident, or the workspace descriptor's ident. `DefaultLibraryIdent` now names the published ident, so a project's first Host click writes a settings file that matches what the Library Manager installs.
+- `InstalledLibrary` uses `IsThisLibrary` and reports `LibraryInfo.LibraryVersion` (the code that is running is the installed copy) instead of the build number.
+- The dock's Update action falls back to the published ident when the settings file names none.
+- `PUBLISHING.md` and the library README name `cyn.sbox_editor_collab`.
+
+**Executed.** `CoreTests` 986 tests passed with the new suite; with the `PublishedIdent` clause of `IsThisLibrary` removed the suite fails on "the Asset Party install is found even though the settings file names the older ident", and it is green again with the clause restored. `Compile` built with 0 warnings and 0 errors. In the open `collab_test` editor, after `ProjectSettings/collaboration.json` named `cyn.sbox_editor_collab`, a screenshot of the dock showed the row as "Collaboration library — Version 1.0.398701 installed" with every readiness row green.
+
+**Not executed.** The new `InstalledLibrary` code path has not been observed running in that editor: the editor holds the installed copy of the library, which predates this change and is replaced only by a republished package. The green row above came from the settings-file correction alone, on the old code. Republishing and reinstalling is what carries the code change to friends. The version shown (`1.0.398701`) is the old build number for that reason; the new code reports the release version.
+
 ## 2026-09-29 — Reconstruction note
 
 The `Libraries/collaboration/` folder, and with it this document, was accidentally deleted on 2026-09-29. The text above was reconstructed afterwards from the evidence that survived the deletion: the task specifications under `.hermes/tasks/` and the overhaul plan under `.hermes/plans/`; the full-file reads of this document kept in the session record, replayed against the exact unified diffs produced by every later patch to it; and the `file_size` and `total_lines` those reads reported, used as checkpoints.
