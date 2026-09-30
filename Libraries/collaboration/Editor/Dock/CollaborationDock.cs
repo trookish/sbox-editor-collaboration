@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using Editor;
 using Sandbox;
@@ -93,6 +94,10 @@ public sealed class CollaborationDock : Widget
 
     private Editor.Label statusDetail;
 
+    private Editor.Label setupBanner;
+
+    private Editor.Label undoHint;
+
     private ReadinessCard readiness;
 
     private ConnectCard connect;
@@ -111,9 +116,17 @@ public sealed class CollaborationDock : Widget
 
     private Widget aboutBody;
 
-    private ScrollArea scroller;
+    private SegmentedControl tabs;
 
-    private ContentCanvas content;
+    private readonly Dictionary<DockTab, ScrollArea> scrollers = new Dictionary<DockTab, ScrollArea>();
+
+    private readonly Dictionary<DockTab, ContentCanvas> pages = new Dictionary<DockTab, ContentCanvas>();
+
+    private DockTab selectedTab = DockTab.Session;
+
+    private DockTab? appliedTab;
+
+    private bool tabChosenByPerson;
 
     private DateTime nextBuildAttempt;
 
@@ -127,7 +140,16 @@ public sealed class CollaborationDock : Widget
 
     private int layoutReflowCount;
 
-    private bool Built => statusDetail != null && readiness != null && connect != null && relay != null && orgRoster != null && sessionRoster != null && controls != null && soloTest != null && aboutToggle != null && aboutBody != null && scroller != null && content != null && scroller.Canvas == content && readiness.Complete && connect.Complete && relay.Complete && orgRoster.Complete && sessionRoster.Complete && controls.Complete && soloTest.Complete;
+    private const string TabCookie = "collaboration.dock.tab";
+
+    private ScrollArea scroller => scrollers.TryGetValue(selectedTab, out ScrollArea value) ? value : null;
+
+    private ContentCanvas content => pages.TryGetValue(selectedTab, out ContentCanvas value) ? value : null;
+
+    private bool Built => statusDetail != null && setupBanner != null && undoHint != null && readiness != null && connect != null && relay != null && orgRoster != null && sessionRoster != null && controls != null && soloTest != null
+        && aboutToggle != null && aboutBody != null && tabs != null && scrollers.Count == DockSectionRules.All.Length && pages.Count == DockSectionRules.All.Length
+        && DockSectionRules.All.All(tab => scrollers[tab] != null && scrollers[tab].Canvas == pages[tab])
+        && readiness.Complete && connect.Complete && relay.Complete && orgRoster.Complete && sessionRoster.Complete && controls.Complete && soloTest.Complete;
 
     public CollaborationDock(Widget parent)
         : base(parent)
@@ -141,72 +163,153 @@ public sealed class CollaborationDock : Widget
     private void Build()
     {
         Layout.Clear(deleteWidgets: true);
-        scroller = null;
-        content = null;
+        scrollers.Clear();
+        pages.Clear();
         Layout.Add(new HeaderBar(this));
-        scroller = Layout.Add(new ScrollArea(this), 1);
-        scroller.VerticalSizeMode = SizeMode.Default;
-        scroller.VerticalScrollbarMode = ScrollbarMode.Auto;
-        scroller.HorizontalScrollbarMode = ScrollbarMode.Off;
-        content = new ContentCanvas(scroller);
-        scroller.Canvas = content;
-        content.SetSizeMode(SizeMode.Default, SizeMode.CanGrow);
-        content.Layout = Layout.Column();
-        content.Layout.Spacing = 8f;
-        content.Layout.SizeConstraint = SizeConstraint.SetMinimumSize;
-        content.ContentMargins = new Margin(0f, 0f, 10f, 0f);
-        Layout layout = content.Layout;
-        statusDetail = layout.Add(new Editor.Label("", content)
+        statusDetail = Layout.Add(new Editor.Label("", this)
         {
             WordWrap = true,
             Color = DockTheme.MutedColor
         });
-        // In a solo test copy the checklist is what the person came to watch, so it goes first; in a real project the card sits below the controls.
+
+        // The native segmented control, the same one the engine's own pages use for Global / Current Scene: themed, with icons, and it collapses to icons when narrow.
+        tabs = Layout.Add(new SegmentedControl(this));
+        foreach (DockTab tab in DockSectionRules.All)
+        {
+            tabs.AddOption(DockSectionRules.Name(tab), DockSectionRules.Icon(tab));
+        }
+        tabs.ToolTip = "Session: host or join, save, undo. People: who is here. Setup: readiness, relay and the solo test.";
+
+        // One scroll area per section, so each keeps its own scroll position and nothing the person is not looking at is laid out.
+        foreach (DockTab tab in DockSectionRules.All)
+        {
+            var area = Layout.Add(new ScrollArea(this), 1);
+            area.VerticalSizeMode = SizeMode.Default;
+            area.VerticalScrollbarMode = ScrollbarMode.Auto;
+            area.HorizontalScrollbarMode = ScrollbarMode.Off;
+            var page = new ContentCanvas(area);
+            area.Canvas = page;
+            page.SetSizeMode(SizeMode.Default, SizeMode.CanGrow);
+            page.Layout = Layout.Column();
+            page.Layout.Spacing = 8f;
+            page.Layout.SizeConstraint = SizeConstraint.SetMinimumSize;
+            page.ContentMargins = new Margin(0f, 0f, 10f, 0f);
+            area.Visible = false;
+            scrollers[tab] = area;
+            pages[tab] = page;
+        }
+
+        // ---- Session: run a session ----
+        Layout session = pages[DockTab.Session].Layout;
+        setupBanner = session.Add(new Editor.Label("", pages[DockTab.Session])
+        {
+            WordWrap = true,
+            Color = DockTheme.WarningColor
+        });
+        setupBanner.Visible = false;
+        connect = session.Add(new ConnectCard(pages[DockTab.Session]));
+        controls = session.Add(new ControlsCard(pages[DockTab.Session], connect));
+        undoHint = session.Add(new Editor.Label("While connected, use collaboration Undo: each commit clears the native undo history and leaves one Collaboration Undo entry, so Ctrl+Z acts on your most recent collaboration operation only.", pages[DockTab.Session])
+        {
+            WordWrap = true,
+            Color = DockTheme.MutedColor
+        });
+        session.AddStretchCell(1);
+
+        // ---- People: who is here ----
+        Layout people = pages[DockTab.People].Layout;
+        sessionRoster = people.Add(new SessionRosterCard(pages[DockTab.People]));
+        orgRoster = people.Add(new OrgRosterCard(pages[DockTab.People]));
+        people.AddStretchCell(1);
+
+        // ---- Setup: get ready ----
+        Layout setup = pages[DockTab.Setup].Layout;
         bool soloCopy = SoloTestRunner.IsSoloCopy;
         if (soloCopy)
         {
-            soloTest = layout.Add(new SoloTestCard(content));
+            soloTest = setup.Add(new SoloTestCard(pages[DockTab.Setup]));
         }
-        readiness = layout.Add(new ReadinessCard(content));
-        connect = layout.Add(new ConnectCard(content));
-        relay = layout.Add(new RelayCard(content));
-        orgRoster = layout.Add(new OrgRosterCard(content));
-        sessionRoster = layout.Add(new SessionRosterCard(content));
-        controls = layout.Add(new ControlsCard(content, connect));
+        readiness = setup.Add(new ReadinessCard(pages[DockTab.Setup]));
+        relay = setup.Add(new RelayCard(pages[DockTab.Setup]));
         if (!soloCopy)
         {
-            soloTest = layout.Add(new SoloTestCard(content));
+            soloTest = setup.Add(new SoloTestCard(pages[DockTab.Setup]));
         }
-        layout.Add(new Editor.Label("While connected, use collaboration Undo. Each commit clears the native undo history and replaces it with one Collaboration Undo entry, so the Undo dock and Ctrl+Z act on your most recent collaboration operation only. Save only when synchronized. Identity is the signed-in Steam account.", content)
-        {
-            WordWrap = true,
-            Color = DockTheme.MutedColor
-        });
-        layout.Add(new Editor.Label("Invite-code and discovery sessions are encrypted; Advanced sessions opened with a typed key are not.", content)
-        {
-            WordWrap = true,
-            Color = DockTheme.MutedColor
-        });
-        aboutToggle = layout.Add(new Editor.Button("▸ About & limits", content)
+        aboutToggle = setup.Add(new Editor.Button("▸ About & limits", pages[DockTab.Setup])
         {
             ToolTip = "What this library does, and what it deliberately does not do."
         });
         aboutToggle.Clicked = ToggleAbout;
-        aboutBody = layout.Add(new Widget(content));
+        aboutBody = setup.Add(new Widget(pages[DockTab.Setup]));
         aboutBody.Layout = Layout.Column();
         aboutBody.Layout.Spacing = 8f;
-        aboutBody.Layout.Add(new Editor.Label("Runtime collaboration is experimental and opt-in only. It currently coordinates lifecycle state only; runtime transport, sampling, undo, apply, runtime hotload data flow, and synchronization are unsupported. Hotload lifecycle blocking, recovery archival, and transport disposal are supported. Source collaboration remains the default.", content)
+        aboutBody.Layout.Add(new Editor.Label("Runtime collaboration is experimental and opt-in only. It currently coordinates lifecycle state only; runtime transport, sampling, undo, apply, runtime hotload data flow, and synchronization are unsupported. Hotload lifecycle blocking, recovery archival, and transport disposal are supported. Source collaboration remains the default.", pages[DockTab.Setup])
         {
             WordWrap = true,
             Color = DockTheme.MutedColor
         });
-        aboutBody.Layout.Add(new Editor.Label(LimitsParagraph, content)
+        aboutBody.Layout.Add(new Editor.Label(LimitsParagraph, pages[DockTab.Setup])
+        {
+            WordWrap = true,
+            Color = DockTheme.MutedColor
+        });
+        aboutBody.Layout.Add(new Editor.Label(FooterTransportLine, pages[DockTab.Setup])
         {
             WordWrap = true,
             Color = DockTheme.MutedColor
         });
         aboutBody.Visible = false;
-        layout.AddStretchCell();
+        setup.AddStretchCell(1);
+
+        // Which section to open on: the last one the person chose, except that a solo test copy always opens on Setup, where its checklist is.
+        int saved = Sandbox.Internal.GlobalToolsNamespace.EditorCookie.Get(TabCookie, -1);
+        selectedTab = DockSectionRules.Initial(soloCopy, saved, CollaborationSession.Current.Readiness == null || ReadinessRules.CanStart(CollaborationSession.Current.Readiness));
+        appliedTab = null;
+        tabChosenByPerson = false;
+        tabs.SelectedIndex = DockSectionRules.IndexOf(selectedTab);
+        tabs.OnSelectedChanged = name => ChooseTab(name);
+        ApplyTab();
+        Reflow();
+    }
+
+    private void ChooseTab(string name)
+    {
+        foreach (DockTab tab in DockSectionRules.All)
+        {
+            if (string.Equals(DockSectionRules.Name(tab), name, StringComparison.Ordinal))
+            {
+                selectedTab = tab;
+                tabChosenByPerson = true;
+                if (!SoloTestRunner.IsSoloCopy)
+                {
+                    Sandbox.Internal.GlobalToolsNamespace.EditorCookie.Set(TabCookie, DockSectionRules.IndexOf(tab));
+                }
+                ApplyTab();
+                return;
+            }
+        }
+    }
+
+    /// <summary>Shows the current section's scroll area and hides the others. Only the visible one is laid out.</summary>
+    private void ApplyTab()
+    {
+        if (appliedTab == selectedTab)
+        {
+            return;
+        }
+        appliedTab = selectedTab;
+        foreach (DockTab tab in DockSectionRules.All)
+        {
+            if (scrollers.TryGetValue(tab, out ScrollArea area) && area != null)
+            {
+                area.Visible = tab == selectedTab;
+            }
+        }
+        int index = DockSectionRules.IndexOf(selectedTab);
+        if (tabs != null && tabs.SelectedIndex != index)
+        {
+            tabs.SelectedIndex = index;
+        }
         Reflow();
     }
 
@@ -308,6 +411,66 @@ public sealed class CollaborationDock : Widget
         sessionRoster.Refresh();
         controls.Refresh();
         soloTest?.Refresh();
+        RefreshSections(current);
+    }
+
+    private bool? lastActionsShown;
+
+    private bool? lastRosterShown;
+
+    private string lastBanner;
+
+    /// <summary>
+    /// Decides, from the session's state, what each section shows. Everything is compared before it is written, so a frame in which nothing changed touches nothing.
+    /// </summary>
+    private void RefreshSections(CollaborationSession session)
+    {
+        bool inSession = session.State != SessionState.Offline && session.State != SessionState.Ready;
+
+        // Save, Undo, Recover and their options: only when there is a session to act on, or something just happened that needs reading.
+        bool actions = DockSectionRules.ShowActions(inSession, controls.HasMessage);
+        if (lastActionsShown != actions)
+        {
+            lastActionsShown = actions;
+            controls.Visible = actions;
+            undoHint.Visible = actions;
+            Reflow();
+        }
+        bool roster = DockSectionRules.ShowSessionRoster(inSession);
+        if (lastRosterShown != roster)
+        {
+            lastRosterShown = roster;
+            sessionRoster.Visible = roster;
+            Reflow();
+        }
+
+        // Why hosting is blocked, at the top of the tab where the person would press Host.
+        string banner = DockSectionRules.SetupBanner(session.Readiness, inSession);
+        if (!string.Equals(banner, lastBanner, StringComparison.Ordinal))
+        {
+            lastBanner = banner;
+            DockTheme.SetText(setupBanner, banner ?? string.Empty);
+            setupBanner.Visible = banner != null;
+            Reflow();
+        }
+
+        // The project folder is not always known on the first frame, so a solo test copy is recognised here as well as when the dock is built: it opens on Setup, where its checklist is.
+        if (!tabChosenByPerson && SoloTestRunner.IsSoloCopy && selectedTab != DockTab.Setup)
+        {
+            selectedTab = DockTab.Setup;
+            ApplyTab();
+        }
+
+        // A person who has not chosen a tab is taken where the action is: to Setup if hosting is blocked, to Session once it is possible. Their own choice is never overridden.
+        if (!tabChosenByPerson && !SoloTestRunner.IsSoloCopy && Sandbox.Internal.GlobalToolsNamespace.EditorCookie.Get(TabCookie, -1) < 0)
+        {
+            DockTab wanted = DockSectionRules.Default(false, session.Readiness == null || session.Readiness.Count == 0 || ReadinessRules.CanStart(session.Readiness));
+            if (wanted != selectedTab)
+            {
+                selectedTab = wanted;
+                ApplyTab();
+            }
+        }
     }
 
     private static bool IsTooShort(Widget widget)
@@ -342,7 +505,7 @@ public sealed class CollaborationDock : Widget
         {
             layoutReflowCount++;
             DockTheme.InvalidateLayout(this);
-            foreach (var item2 in Cards())
+            foreach (var item2 in VisibleCards())
             {
                 DockCard item = item2.Card;
                 DockTheme.InvalidateLayout(item);
@@ -380,7 +543,7 @@ public sealed class CollaborationDock : Widget
             list.Add("column");
         }
         num += CountOverlaps(content);
-        foreach (var (item, dockCard) in Cards())
+        foreach (var (item, dockCard) in VisibleCards())
         {
             if (dockCard != null)
             {
@@ -395,7 +558,7 @@ public sealed class CollaborationDock : Widget
         Vector2 vector = content.WantedSize();
         StringBuilder stringBuilder = new StringBuilder(384);
         AppendCardDetail(stringBuilder, "column", vector.y, content.Height, content.Width, ContentBottom(content), content.MinimumNeeded());
-        foreach (var (text, dockCard2) in Cards())
+        foreach (var (text, dockCard2) in VisibleCards())
         {
             if (dockCard2 != null)
             {
@@ -409,6 +572,7 @@ public sealed class CollaborationDock : Widget
         }
         StringBuilder stringBuilder2 = new StringBuilder(512);
         stringBuilder2.Append((list.Count == 0 && num == 0) ? "state=ok" : "state=faulty");
+        stringBuilder2.Append("; tab=").Append(DockSectionRules.Name(selectedTab));
         stringBuilder2.Append("; reflows=").Append(layoutReflowCount);
         stringBuilder2.Append("; dock=").Append(Size.x.ToString("0")).Append('x')
             .Append(Size.y.ToString("0"));
@@ -479,14 +643,42 @@ public sealed class CollaborationDock : Widget
         return num;
     }
 
+    /// <summary>Every card with the section it lives in. A hidden card has no size, so the layout check and the reflow use only the ones on the visible section.</summary>
     private IEnumerable<(string Name, DockCard Card)> Cards()
     {
-        yield return (Name: "readiness", Card: readiness);
         yield return (Name: "connect", Card: connect);
-        yield return (Name: "relay", Card: relay);
-        yield return (Name: "orgRoster", Card: orgRoster);
-        yield return (Name: "sessionRoster", Card: sessionRoster);
         yield return (Name: "controls", Card: controls);
+        yield return (Name: "sessionRoster", Card: sessionRoster);
+        yield return (Name: "orgRoster", Card: orgRoster);
+        yield return (Name: "readiness", Card: readiness);
+        yield return (Name: "relay", Card: relay);
+        yield return (Name: "soloTest", Card: soloTest);
+    }
+
+    private static DockTab SectionOf(string card)
+    {
+        switch (card)
+        {
+            case "connect":
+            case "controls":
+                return DockTab.Session;
+            case "sessionRoster":
+            case "orgRoster":
+                return DockTab.People;
+            default:
+                return DockTab.Setup;
+        }
+    }
+
+    private IEnumerable<(string Name, DockCard Card)> VisibleCards()
+    {
+        foreach (var item in Cards())
+        {
+            if (item.Card != null && item.Card.Visible && SectionOf(item.Name) == selectedTab)
+            {
+                yield return item;
+            }
+        }
     }
 
     private static int CountOverlaps(Widget parent)

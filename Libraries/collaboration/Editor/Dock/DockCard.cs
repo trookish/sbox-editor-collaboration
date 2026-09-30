@@ -19,14 +19,17 @@ public abstract class DockCard : Widget
         Layout.Spacing = 4f;
         OnPaintOverride = () =>
         {
-            Paint.SetBrushAndPen(DockTheme.CardColor, Color.Transparent, 0f);
+            // A hairline border, so each section reads as its own block on any theme, light or dark.
+            Paint.SetBrushAndPen(DockTheme.CardColor, Theme.Border.WithAlpha(0.6f), 1f);
             Paint.DrawRect(LocalRect, 6f);
             return false;
         };
         Title = Layout.Add(new Label(title, this)
         {
-            Color = DockTheme.MutedColor
+            Color = Theme.Text.WithAlpha(0.9f)
         });
+        // The section's name is a heading, not one more line of text.
+        Title.SetStyles("font-weight: 600;");
     }
 
     protected static void SetText(Label label, string text)

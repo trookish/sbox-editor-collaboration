@@ -15,8 +15,6 @@ public sealed class ControlsCard : DockCard
 
     private readonly Button recover;
 
-    private readonly Button leave;
-
     private readonly Checkbox autoSave;
 
     private readonly Checkbox autoRecover;
@@ -43,7 +41,7 @@ public sealed class ControlsCard : DockCard
 
     private string lastAction;
 
-    protected override bool FieldsAssigned => connect != null && message != null && save != null && undo != null && recover != null && leave != null && autoSave != null && autoRecover != null;
+    protected override bool FieldsAssigned => connect != null && message != null && save != null && undo != null && recover != null && autoSave != null && autoRecover != null;
 
     public ControlsCard(Widget parent, ConnectCard connect)
         : base(parent, "Controls")
@@ -87,15 +85,6 @@ public sealed class ControlsCard : DockCard
                 });
             }
         });
-        leave = Layout.Add(new Button.Danger("Leave"));
-        leave.Clicked = () =>
-        {
-            DockCard.Run(() =>
-            {
-                connect.CancelStarts();
-                CollaborationSession.Current.Leave();
-            });
-        };
         autoSave = Layout.Add(new Checkbox
         {
             Text = "Auto-save when idle",
@@ -117,6 +106,11 @@ public sealed class ControlsCard : DockCard
             CollaborationSession.Current.AutoRecover = controlsCard.autoRecover.Value;
         }));
     }
+
+    /// <summary>True while the card is showing a problem (an error or a recovery notice), so the dock keeps the card on screen after a session ends until it has been read. A line that only reports a save or an undo does not count.</summary>
+    public bool HasMessage => message != null && message.Visible && problem;
+
+    private bool problem;
 
     private static void SetEnabled(Button button, bool enabled)
     {
@@ -160,6 +154,9 @@ public sealed class ControlsCard : DockCard
             lastAction = actionNotice;
             DockCard.SetText(message, ControlsMessageRules.Compose(terminalTeardownError, error, recoveryPath, recoveryNotice, actionNotice, undoNotice, saveNotice));
             message.Visible = message.Text.Length > 0;
+            // Red is for something that went wrong. A line that only says what was done is shown quietly.
+            problem = ControlsMessageRules.IsProblem(terminalTeardownError, error, recoveryNotice);
+            message.Color = problem ? DockTheme.BlockedColor : DockTheme.MutedColor;
         }
         if (flag)
         {
@@ -186,7 +183,6 @@ public sealed class ControlsCard : DockCard
                 flag6 = !flag4;
             }
             SetEnabled(button, flag6);
-            SetEnabled(leave, !current.RuntimeLifecycle.IsTransitionInProgress);
         }
     }
 }

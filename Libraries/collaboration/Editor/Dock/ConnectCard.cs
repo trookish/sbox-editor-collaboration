@@ -21,6 +21,12 @@ public sealed class ConnectCard : DockCard
 
     private readonly LineEdit invite;
 
+    private readonly Label joinLabel;
+
+    private readonly Widget joinRow;
+
+    private bool advancedOpen;
+
     private readonly Label notice;
 
     private readonly Label tokenNotice;
@@ -77,7 +83,7 @@ public sealed class ConnectCard : DockCard
 
     public int PortNumber => ParsePort(port.Text);
 
-    protected override bool FieldsAssigned => host != null && leave != null && hostCode != null && copy != null && invite != null && notice != null && tokenNotice != null && runtime != null && advanced != null && advancedToggle != null && address != null && port != null && key != null && allowUnverified != null && experimentalRuntime != null && playMode != null && lifecycle != null;
+    protected override bool FieldsAssigned => host != null && leave != null && joinLabel != null && joinRow != null && hostCode != null && copy != null && invite != null && notice != null && tokenNotice != null && runtime != null && advanced != null && advancedToggle != null && address != null && port != null && key != null && allowUnverified != null && experimentalRuntime != null && playMode != null && lifecycle != null;
 
     public ConnectCard(Widget parent)
         : base(parent, "Connect")
@@ -113,7 +119,12 @@ public sealed class ConnectCard : DockCard
             WordWrap = true,
             Color = DockTheme.MutedColor
         });
+        joinLabel = Layout.Add(new Label("Join with a code", this)
+        {
+            Color = DockTheme.MutedColor
+        });
         Widget widget2 = Layout.Add(new Widget(this));
+        joinRow = widget2;
         widget2.Layout = Layout.Row();
         widget2.Layout.Spacing = 4f;
         invite = widget2.Layout.Add(new LineEdit("", this)
@@ -193,8 +204,9 @@ public sealed class ConnectCard : DockCard
 
     private void ToggleAdvanced()
     {
-        advanced.Visible = !advanced.Visible;
-        DockTheme.SetText(advancedToggle, advanced.Visible ? "▾ Advanced" : "▸ Advanced");
+        advancedOpen = !advancedOpen;
+        advanced.Visible = advancedOpen;
+        DockTheme.SetText(advancedToggle, advancedOpen ? "▾ Advanced" : "▸ Advanced");
         AdjustSize();
         Reflow();
     }
@@ -237,31 +249,8 @@ public sealed class ConnectCard : DockCard
 
     private static string BuildNotice(CollaborationSession session, string typedCode)
     {
-        string discoveryStatus = session.DiscoveryStatus;
-        string text = ((discoveryStatus != null && discoveryStatus.Length > 0) ? ("\n" + discoveryStatus) : string.Empty);
-        // While playing, the one thing a person needs to know is why nothing they change appears for others.
-        string playNotice = session.PlayNotice;
-        string play = (playNotice != null) ? ("\n" + playNotice) : string.Empty;
-        string solo = (session.SoloHarnessNotice != null) ? ("\n" + session.SoloHarnessNotice) : string.Empty;
-        play += solo;
-        if (session.Connected && !session.IsHost && session.RouteDescription != null)
-        {
-            return session.RouteDescription + play + text;
-        }
-        if (typedCode != null && typedCode.Length > 0 && !session.Connected)
-        {
-            return "Joining with this code: the local network is tried first, then the relay named in the code, then the host's address, then Advanced." + text;
-        }
-        if (session.IsHost && session.InviteCode != null)
-        {
-            string publicEndpointStatus = session.PublicEndpointStatus;
-            string relayStatus = session.RelayStatus ?? session.NoRelayNotice;
-            string relayLine = (relayStatus != null) ? ("\n" + relayStatus) : string.Empty;
-            string text2 = (session.PortMappingFailed ? ("\n" + session.PortMappingStatus) : string.Empty);
-            string head = (publicEndpointStatus == null) ? "Give the code above to everyone you want in this session." : (publicEndpointStatus + "\nGive the code above to everyone you want in this session.");
-            return head + relayLine + text2 + play + text;
-        }
-        return "Enter an invite code to join, or set the host address under Advanced." + text;
+        return ConnectCopy.Build(session.Connected, session.IsHost, session.IsHost && session.InviteCode != null, session.Connected && !session.IsHost ? session.RouteDescription : null, typedCode,
+            session.RelayStatus ?? session.NoRelayNotice, session.PortMappingFailed ? session.PortMappingStatus : null, session.PlayNotice, session.SoloHarnessNotice, session.DiscoveryStatus);
     }
 
     public void Refresh()
@@ -275,6 +264,19 @@ public sealed class ConnectCard : DockCard
             lastHostShown = flag2;
             host.Visible = flag2;
             leave.Visible = !flag2;
+            // Joining, and the direct-connection fields, only make sense before a session: once one is live they are out of the way, and come back when it ends.
+            joinLabel.Visible = flag2;
+            joinRow.Visible = flag2;
+            advancedToggle.Visible = flag2;
+            advanced.Visible = flag2 && advancedOpen;
+            AdjustSize();
+            Reflow();
+        }
+        // The one Leave button is disabled while play mode is changing state, as the Controls card's own copy used to be.
+        bool canLeave = !current.RuntimeLifecycle.IsTransitionInProgress;
+        if (leave.Enabled != canLeave)
+        {
+            leave.Enabled = canLeave;
         }
         if (flag2)
         {

@@ -6720,6 +6720,73 @@ Assert( RelayDefaults.NoRelayNotice( effectiveRelay: "ws://localhost:8080/relay"
     Assert( rsDone.Mode == RelaySetupMode.Done && rsDone.Text.StartsWith( "Relay ready" ) && rsDone.Text.Contains( "mine.workers.dev" ) && !rsDone.ShowSetup, "a finished setup says the relay is ready and names it" );
 }
 
+
+// ---- The dock's three sections ------------------------------------------------------------------------------------------------------------------
+// The dock used to be one long column of seven cards. It is now three sections (Session, People, Setup), each its own tab, and only what applies right now is shown.
+{
+    Assert( DockSectionRules.All.Length == 3 && DockSectionRules.All.Distinct().Count() == 3 && DockSectionRules.All[0] == DockTab.Session, "there are three sections and the Session tab comes first" );
+    Assert( DockSectionRules.All.All( t => DockSectionRules.Name( t ).Length > 0 && DockSectionRules.Icon( t ).Length > 0 && DockSectionRules.Purpose( t ).EndsWith( "." ) )
+        && DockSectionRules.All.Select( DockSectionRules.Name ).Distinct().Count() == 3 && DockSectionRules.All.Select( DockSectionRules.Icon ).Distinct().Count() == 3,
+        "each section has its own name, icon and one-sentence purpose for its tooltip" );
+    Assert( DockSectionRules.Name( DockTab.Session ) == "Session" && DockSectionRules.Name( DockTab.People ) == "People" && DockSectionRules.Name( DockTab.Setup ) == "Setup", "the sections are named Session, People and Setup" );
+
+    Assert( DockSectionRules.Default( soloCopy: false, readyToHost: true ) == DockTab.Session, "a person who can host opens on the Session tab" );
+    Assert( DockSectionRules.Default( soloCopy: false, readyToHost: false ) == DockTab.Setup, "a person who cannot host yet opens on Setup, where the reason and the fix are" );
+    Assert( DockSectionRules.Default( soloCopy: true, readyToHost: true ) == DockTab.Setup && DockSectionRules.Default( soloCopy: true, readyToHost: false ) == DockTab.Setup, "a solo test copy opens on Setup, where the test's checklist is" );
+
+    Assert( DockSectionRules.FromIndex( 0, DockTab.People ) == DockTab.Session && DockSectionRules.FromIndex( 2, DockTab.Session ) == DockTab.Setup, "a remembered tab index selects that tab" );
+    Assert( DockSectionRules.FromIndex( -1, DockTab.People ) == DockTab.People && DockSectionRules.FromIndex( 3, DockTab.Setup ) == DockTab.Setup && DockSectionRules.FromIndex( 99, DockTab.Session ) == DockTab.Session,
+        "a remembered index that is out of range falls back, so a setting left by another version never opens a blank dock" );
+    Assert( DockSectionRules.All.All( t => DockSectionRules.FromIndex( DockSectionRules.IndexOf( t ), DockTab.Setup ) == t ), "an index and its tab round-trip" );
+    Assert( DockSectionRules.Initial( soloCopy: true, savedIndex: 0, readyToHost: true ) == DockTab.Setup && DockSectionRules.Initial( soloCopy: true, savedIndex: 1, readyToHost: false ) == DockTab.Setup,
+        "a solo test copy opens on Setup whatever tab was chosen last, because the editor remembers that choice across projects" );
+    Assert( DockSectionRules.Initial( false, 1, true ) == DockTab.People && DockSectionRules.Initial( false, 0, false ) == DockTab.Session, "otherwise the tab the person last chose is used, even when hosting is blocked (the banner explains)" );
+    Assert( DockSectionRules.Initial( false, -1, true ) == DockTab.Session && DockSectionRules.Initial( false, -1, false ) == DockTab.Setup && DockSectionRules.Initial( false, 42, true ) == DockTab.Session, "with nothing remembered, or something unusable, the default applies" );
+
+    Assert( !DockSectionRules.ShowActions( inSession: false, hasNotice: false ), "an idle dock does not show Save, Undo or Recover, which have nothing to act on" );
+    Assert( DockSectionRules.ShowActions( inSession: true, hasNotice: false ) && DockSectionRules.ShowActions( inSession: false, hasNotice: true ) && DockSectionRules.ShowActions( inSession: true, hasNotice: true ),
+        "the actions appear during a session, and after one ends if something happened that needs an answer" );
+    Assert( !DockSectionRules.ShowSessionRoster( false ) && DockSectionRules.ShowSessionRoster( true ), "the list of people in the session appears only when there is a session" );
+
+    var dsOk = new ReadinessItem( "steam", "Steam sign-in", ReadinessLevel.Ok, "signed in", null );
+    var dsBlocked = new ReadinessItem( "published", "Project publication required", ReadinessLevel.Blocked, "Publish this project", null );
+    var dsWarn = new ReadinessItem( "library", "Collaboration library", ReadinessLevel.Warning, "version unknown", null );
+    Assert( DockSectionRules.SetupBanner( new[] { dsOk, dsWarn }, inSession: false ) == null, "nothing blocking means no banner; a warning does not block hosting" );
+    var dsBanner = DockSectionRules.SetupBanner( new[] { dsOk, dsBlocked }, inSession: false );
+    Assert( dsBanner != null && dsBanner.Contains( "project publication required" ) && dsBanner.Contains( "Setup tab" ) && !dsBanner.Contains( ".." ), "a blocked check puts its reason, and where to look, at the top of the Session tab" );
+    Assert( DockSectionRules.SetupBanner( new[] { dsOk, dsBlocked }, inSession: true ) == null, "during a session the banner is moot and is not shown" );
+    Assert( DockSectionRules.SetupBanner( null, false ) == null && DockSectionRules.SetupBanner( Array.Empty<ReadinessItem>(), false ) == null, "before the checks have answered there is no banner rather than a false alarm" );
+}
+
+
+// ---- The words under Host and Join ---------------------------------------------------------------------------------------------------------------
+{
+    string cc( bool connected = false, bool isHost = false, bool hosting = false, string route = null, string code = null, string relay = null, string port = null, string play = null, string solo = null, string disc = null )
+        => ConnectCopy.Build( connected, isHost, hosting, route, code, relay, port, play, solo, disc );
+    Assert( cc() == ConnectCopy.Idle && !ConnectCopy.Idle.Contains( "\n" ), "an idle dock says one thing: host, or paste a code" );
+    Assert( cc( code: "ABCD-EFGH" ) == ConnectCopy.ReadyToJoin, "with a code typed, it says it is ready to join" );
+    Assert( cc( code: "  " ) == ConnectCopy.Idle, "a code of only spaces counts as none" );
+    Assert( cc( isHost: true, hosting: true ) == ConnectCopy.ShareCode, "a host with a live session is told what to do with the code, in one sentence" );
+    var hostFull = cc( isHost: true, hosting: true, relay: "Relay ready.", port: "No router answered.", play: "Playing: changes are not shared." ).Split( '\n' );
+    Assert( hostFull.Length == 4 && hostFull[0] == ConnectCopy.ShareCode && hostFull[1] == "Relay ready." && hostFull[2] == "No router answered." && hostFull[3].StartsWith( "Playing" ), "a host's detail lines follow the lead, in a fixed order" );
+    Assert( cc( connected: true, route: "Connected through the relay." ) == "Connected through the relay.", "a connected guest sees how they are connected" );
+    Assert( cc( connected: true, isHost: true, hosting: true ) == ConnectCopy.ShareCode, "a host is never shown a guest's route line" );
+    Assert( !cc( isHost: true, hosting: true, relay: "", port: "  ", play: null ).Contains( "\n" ), "empty detail lines add nothing" );
+    Assert( cc( disc: "Discovery failed." ) == ConnectCopy.Idle + "\nDiscovery failed.", "a discovery failure is shown on its own line under the idle lead" );
+    Assert( cc( code: "X", solo: "Solo test copy." ).EndsWith( "\nSolo test copy." ), "the solo-copy notice is always last" );
+    Assert( !cc( isHost: true, hosting: true, relay: "Relay ready." ).Contains( "Public endpoint" ), "the host's public address is not in the words under the buttons" );
+}
+
+
+// ---- Red means something went wrong ---------------------------------------------------------------------------------------------------------------
+{
+    Assert( !ControlsMessageRules.IsProblem( null, null, null ), "a save, undo or action notice alone is not a problem" );
+    Assert( ControlsMessageRules.IsProblem( "teardown failed", null, null ) && ControlsMessageRules.IsProblem( null, "relay refused", null ) && ControlsMessageRules.IsProblem( null, null, "recovery archive written" ),
+        "a teardown error, a session error and a recovery notice are each a problem" );
+    Assert( !ControlsMessageRules.IsProblem( null, null, null ) && ControlsMessageRules.Compose( null, null, null, null, null, null, "Auto-saved the synchronized scene at 01:14." ).StartsWith( "Auto-saved" ),
+        "an auto-save line still reaches the card; it is only shown quietly and does not keep the card open" );
+}
+
 Console.WriteLine($"{passed} tests passed");
 
 // Faked transport: the request shape and the decision are asserted without a network.

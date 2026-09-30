@@ -16,12 +16,12 @@ Read the limits below before using it on valuable work. This is not full Roblox 
 
 That is the whole setup. The library carries a shared relay address, so a friend in Germany can join a host in Saudi Arabia without either of you opening a port, running a server, or editing a setting.
 
-**Two things have to be true first**, and the dock's *Readiness* card shows both:
+**Two things have to be true first**, and the dock's *Readiness* card (Setup tab) shows both:
 
 - You are **Steam friends** and members of the **same s&box organization**.
 - Your copies of the project are **identical** (the host refuses a friend whose files differ, and says so). Send the friend the project the first time, and after that share changes the way you normally do.
 
-**No relay yet?** The Relay card in the dock says so and sets one up from inside the editor, with nothing to install and no need to close it: press **1. Open Cloudflare to create a token** (a free account is enough; the page opens with only the two permissions the relay needs already chosen), copy the token it shows, then press **2. Set up relay from the clipboard**. The relay is put on your own Cloudflare account, its address is remembered on this computer, and the token is used once, never saved, and removed from the clipboard afterwards. The library's maintainer can instead publish one shared relay inside the library (`RelayDefaults.DefaultUrl`), so that nobody has to do this. Until a relay exists, friends can join only on the same network or through a forwarded port.
+**No relay yet?** The Relay card on the dock's Setup tab says so and sets one up from inside the editor, with nothing to install and no need to close it: press **1. Open Cloudflare to create a token** (a free account is enough; the page opens with only the two permissions the relay needs already chosen), copy the token it shows, then press **2. Set up relay from the clipboard**. The relay is put on your own Cloudflare account, its address is remembered on this computer, and the token is used once, never saved, and removed from the clipboard afterwards. The library's maintainer can instead publish one shared relay inside the library (`RelayDefaults.DefaultUrl`), so that nobody has to do this. Until a relay exists, friends can join only on the same network or through a forwarded port.
 
 **Want to try it alone first?** Use the **Try it alone** card (see [below](#try-it-alone-the-one-click-solo-test)).
 
@@ -209,16 +209,17 @@ A full session normally needs two Steam accounts: the host refuses a second conn
 
 ## The Collaboration dock
 
-**View → Collaboration** opens one column of panels, in this order:
+**View → Collaboration** opens a header and three sections, chosen with a tab bar. Only what applies at the moment is shown, and the editor remembers the section you were last in.
 
-- **Try it alone** — one button that runs the solo test (see [Try it alone](#try-it-alone-the-one-click-solo-test)); inside a solo test copy it moves to the top and shows the live checklist. In a real project it sits below Controls and shows the last run's summary.
-- **Header** — a state pill (a coloured dot and a verb), the organization badge, and one status detail line describing what the session is doing or why it stopped.
-- **Readiness** — the pre-flight checklist: Steam sign-in (with the signed-in persona), active scene, project publication, collaboration library version, and organization membership. Each row is Ok, a warning, or blocked, and only a blocked row stops hosting; `ReadinessRules.BlockReason` is the sentence hosting refuses with.
-- **Connect** — the single primary action, **Host session** while nothing runs and **Leave** while something does, so the panel never offers two contradictory actions. While hosting, the invite code appears in a read-only field with a **Copy** button. Joining is a paste of that code plus **Join**. Below it, the identity line (the neutral *Preparing identity…* pending state above), any runtime-lifecycle notice, and the collapsed **Advanced** section: host address, port, shared session key, the *Allow peers whose Steam identity could not be verified* checkbox (off by default) and the experimental runtime checkbox (off by default).
-- **Organization** — the organization roster with avatars, read from the organization API.
-- **This session** — the connected collaborators, their Steam accounts and their active scenes.
-- **Controls** — **Save synchronized scene**, **Undo my last collaboration operation**, and **Recover & reconnect**, each refusing or explaining when it cannot run, followed by two preference checkboxes, **Auto-save when idle** and **Automatic recovery**, both off by default. The card's status line also carries the last save notice and the last refused undo/redo notice.
-- **About & limits** — a collapsible footer quoting the library's own limits.
+The header is always visible: a state pill (a coloured dot and a verb), the organization badge, the library version, and one status line saying what the session is doing or why it stopped.
+
+| Section | What is in it | When it is shown |
+| --- | --- | --- |
+| **Session** | **Connect**: **Host session** and, below it, the code field with **Join**; while hosting, the invite code with **Copy**, and **Leave** in place of Host. **Controls**: **Save synchronized scene**, **Undo my last collaboration operation**, **Recover & reconnect**, and the two preferences **Auto-save when idle** and **Automatic recovery** (both off by default). | Controls only during a session, or after one ended with an error or a recovery notice that has not been read. A line at the top says why hosting is blocked, with a pointer to Setup. |
+| **People** | **This session**: the connected collaborators, their accounts and their scenes, with a button that takes you to where they are working. **Organization**: the members of your s&box organization, with who is online and who is in the session. | This session only during a session. |
+| **Setup** | **Readiness**: Steam sign-in, active scene, project publication, library version and organization membership; only a blocked row stops hosting, and `ReadinessRules.BlockReason` is the sentence hosting refuses with. **Relay**: sets up the relay from the editor when none exists (see [Connecting across networks](#connecting-across-networks)). **Try it alone**: one button that runs the solo test (see [Try it alone](#try-it-alone-the-one-click-solo-test)). **About & limits**: a collapsed footer quoting the library's own limits. | Always. A person who cannot host yet is opened on Setup, and a solo test copy always opens on Setup, where its live checklist is. |
+
+What each section shows, and which one opens first, is decided by `DockSectionRules` and `ConnectCopy` in `Editor/Core`, which have no engine dependency and are covered by the test suite. The tab bar is the engine's own `SegmentedControl`, the one its project-settings pages use, so it follows the editor's theme.
 
 The dock is driven by probe commands in this workspace's validation; **no test has exercised its buttons, checkboxes and toggles by clicking them in a live editor.** Treat the interactive paths as reviewed code, not as observed behaviour.
 
