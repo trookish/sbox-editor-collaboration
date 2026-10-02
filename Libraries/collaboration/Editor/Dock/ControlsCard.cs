@@ -41,6 +41,8 @@ public sealed class ControlsCard : DockCard
 
     private string lastAction;
 
+    private string lastMergeNotice;
+
     protected override bool FieldsAssigned => connect != null && message != null && save != null && undo != null && recover != null && autoSave != null && autoRecover != null;
 
     public ControlsCard(Widget parent, ConnectCard connect)
@@ -130,6 +132,7 @@ public sealed class ControlsCard : DockCard
         string saveNotice = current.SaveNotice;
         string undoNotice = current.UndoNotice;
         string actionNotice = current.ActionNotice;
+        string mergeNotice = current.MergeNotice;
         SessionState state = current.State;
         bool connected = current.Connected;
         bool busy = current.Busy;
@@ -143,7 +146,7 @@ public sealed class ControlsCard : DockCard
             autoRecover.Value = current.AutoRecover;
         }
         bool flag = state != lastState || connected != lastConnected || busy != lastBusy || state2 != lastLifecycleState || !string.Equals(terminalTeardownError, lastTerminal, StringComparison.Ordinal) || !string.Equals(error, lastError, StringComparison.Ordinal);
-        if (!string.Equals(terminalTeardownError, lastTerminal, StringComparison.Ordinal) || !string.Equals(error, lastError, StringComparison.Ordinal) || !string.Equals(recoveryNotice, lastRecovery, StringComparison.Ordinal) || !string.Equals(recoveryPath, lastPath, StringComparison.Ordinal) || !string.Equals(saveNotice, lastSaveNotice, StringComparison.Ordinal) || !string.Equals(undoNotice, lastUndoNotice, StringComparison.Ordinal) || !string.Equals(actionNotice, lastAction, StringComparison.Ordinal))
+        if (!string.Equals(terminalTeardownError, lastTerminal, StringComparison.Ordinal) || !string.Equals(error, lastError, StringComparison.Ordinal) || !string.Equals(recoveryNotice, lastRecovery, StringComparison.Ordinal) || !string.Equals(recoveryPath, lastPath, StringComparison.Ordinal) || !string.Equals(saveNotice, lastSaveNotice, StringComparison.Ordinal) || !string.Equals(undoNotice, lastUndoNotice, StringComparison.Ordinal) || !string.Equals(actionNotice, lastAction, StringComparison.Ordinal) || !string.Equals(mergeNotice, lastMergeNotice, StringComparison.Ordinal))
         {
             lastTerminal = terminalTeardownError;
             lastError = error;
@@ -152,7 +155,8 @@ public sealed class ControlsCard : DockCard
             lastSaveNotice = saveNotice;
             lastUndoNotice = undoNotice;
             lastAction = actionNotice;
-            DockCard.SetText(message, ControlsMessageRules.Compose(terminalTeardownError, error, recoveryPath, recoveryNotice, actionNotice, undoNotice, saveNotice));
+            lastMergeNotice = mergeNotice;
+            DockCard.SetText(message, ControlsMessageRules.Compose(terminalTeardownError, error, recoveryPath, recoveryNotice, actionNotice, undoNotice, saveNotice, mergeNotice));
             message.Visible = message.Text.Length > 0;
             // Red is for something that went wrong. A line that only says what was done is shown quietly.
             problem = ControlsMessageRules.IsProblem(terminalTeardownError, error, recoveryNotice);

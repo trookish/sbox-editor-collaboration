@@ -11,7 +11,7 @@ public static class ControlsMessageRules
         return terminal != null || error != null || recoveryNotice != null;
     }
 
-    public static string Compose(string terminal, string error, string recoveryPath, string recoveryNotice, string actionNotice, string undoNotice, string saveNotice)
+    public static string Compose(string terminal, string error, string recoveryPath, string recoveryNotice, string actionNotice, string undoNotice, string saveNotice, string mergeNotice = null)
     {
         if (terminal != null)
         {
@@ -23,6 +23,7 @@ public static class ControlsMessageRules
             string text = string.IsNullOrEmpty(recoveryPath) ? error : (error + "\nRecovery: " + recoveryPath);
             return (actionNotice == null) ? text : (text + "\n" + actionNotice);
         }
-        return recoveryNotice ?? actionNotice ?? undoNotice ?? saveNotice ?? string.Empty;
+        // A merge notice is news about somebody else's edit meeting the user's own, so it outranks the routine undo and save lines.
+        return recoveryNotice ?? actionNotice ?? mergeNotice ?? undoNotice ?? saveNotice ?? string.Empty;
     }
 }
