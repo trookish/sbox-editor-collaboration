@@ -18,6 +18,8 @@
     <!-- The relay server sources, compiled in rather than referenced so the tests host it in-process. -->
     <Compile Include="../Relay/RelayServer.cs" Link="Relay/RelayServer.cs" />
     <Compile Include="../Relay/RelayOptions.cs" Link="Relay/RelayOptions.cs" />
+    <!-- The host-run relay, so `embedded` can hold it to the same conformance suite as the Worker. -->
+    <Compile Include="../../Libraries/collaboration/Editor/Connect/EmbeddedRelay.cs" Link="Connect/EmbeddedRelay.cs" />
   </ItemGroup>
 
 </Project>
