@@ -3690,8 +3690,10 @@ bool failWrites=false;
 var disk = new Authority(_ => {if(failWrites) throw new IOException("disk full");});
 disk.Subscribe(new() {Scene="scenes/test.scene",Objects=[first]}); failWrites=true;
 Assert(disk.Apply(a).Kind=="reject" && disk.Revision==0 && StateRules.Equal(disk.Scenes["scenes/test.scene"][first.Id],first),"operation not acknowledged on journal failure");
-using var listener = new Listener("127.0.0.1",27846);
-using var client = await Wire.Connect("127.0.0.1",27846);
+// Ask the OS for a free port so concurrent test runs (parallel worktrees) never collide on a fixed one.
+int freePort; { var probe = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0); probe.Start(); freePort = ((System.Net.IPEndPoint)probe.LocalEndpoint).Port; probe.Stop(); }
+using var listener = new Listener("127.0.0.1",freePort);
+using var client = await Wire.Connect("127.0.0.1",freePort);
 Wire accepted = null;
 var deadline=DateTime.UtcNow.AddSeconds(5);
 while(accepted is null && DateTime.UtcNow<deadline) {listener.Accepted.TryDequeue(out accepted); await Task.Delay(10);}
