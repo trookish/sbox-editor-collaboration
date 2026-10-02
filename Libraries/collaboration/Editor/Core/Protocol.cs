@@ -82,6 +82,21 @@ public sealed class Packet
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public bool Merged { get; set; }
+
+    /// <summary>
+    /// On a ping: the fingerprint (<see cref="SceneDigest"/>) of the scene state this client last had confirmed by the host, so the
+    /// host can notice an editor that has silently drifted. Additive: omitted from the wire when unset, and a host that predates it ignores it.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string Digest { get; set; }
+
+    /// <summary>On a ping: the last revision this client had applied when it computed <see cref="Digest"/>. The host compares digests only at equal revisions.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public long? DigestRevision { get; set; }
+
+    /// <summary>On a ping: the scene <see cref="Digest"/> describes.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string DigestScene { get; set; }
 }
 
 public static class Protocol
