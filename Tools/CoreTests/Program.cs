@@ -6787,6 +6787,8 @@ Assert( RelayDefaults.NoRelayNotice( effectiveRelay: "ws://localhost:8080/relay"
         "an auto-save line still reaches the card; it is only shown quietly and does not keep the card open" );
 }
 
+SectionRunner.RunAll( Assert );
+
 Console.WriteLine($"{passed} tests passed");
 
 // Faked transport: the request shape and the decision are asserted without a network.
