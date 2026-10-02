@@ -337,7 +337,7 @@ public static class StateRules
         }
         foreach (string item3 in c.Before.Data.Select((KeyValuePair<string, JsonNode> x) => x.Key).Union(c.After.Data.Select((KeyValuePair<string, JsonNode> x) => x.Key)))
         {
-            if (JsonNode.DeepEquals(c.Before.Data[item3], c.After.Data[item3]) || ObjectFields.Contains(item3))
+            if (ValuesEqual(c.Before.Data[item3], c.After.Data[item3]) || ObjectFields.Contains(item3))
             {
                 continue;
             }
@@ -358,7 +358,7 @@ public static class StateRules
                 string value = jsonObject2["__type"].GetValue<string>();
                 foreach (string item4 in jsonObject2.Select((KeyValuePair<string, JsonNode> x) => x.Key).Union(jsonObject3.Select((KeyValuePair<string, JsonNode> x) => x.Key)))
                 {
-                    if (!JsonNode.DeepEquals(jsonObject2[item4], jsonObject3[item4]))
+                    if (!ValuesEqual(jsonObject2[item4], jsonObject3[item4]))
                     {
                         if (!ComponentFields.TryGetValue(value, out var value2) || !value2.Contains(item4))
                         {

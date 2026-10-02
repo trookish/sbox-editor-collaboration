@@ -71,6 +71,7 @@ static class PropertyMergeTests
     public static void Run( Action<bool, string> assert )
     {
         FloatTolerance( assert );
+        ValidationFloatNoise( assert );
         ThreeWayMerge( assert );
         AuthorityMerge( assert );
         PacketFields( assert );
@@ -124,6 +125,24 @@ static class PropertyMergeTests
         assert( !StateRules.Equal( noisy, noisy with { Parent = Guid.NewGuid().ToString() } ) && !StateRules.Equal( noisy, null ) && StateRules.Equal( null, null ), "merge_equal_still_compares_parent_and_null" );
 
         RuntimeFloatNoise( assert );
+    }
+
+    // ValidateChange decides which properties an edit changed in order to refuse the unsupported ones. An editor echo of an
+    // untouched unsupported property (0.6 written back as 0.600000024) is not a change, so it must not refuse the whole edit.
+    static void ValidationFloatNoise( Action<bool, string> assert )
+    {
+        var before = Edited( Cube( "Cube", "0,0,0", "", Renderer() ), d => { d["Mass"] = 0.6; d["Components"]!.AsArray()[0]!["Opacity"] = 0.6; } );
+        var echoed = Edited( With( before, "Position", "4,0,0" ), d => { d["Mass"] = JsonNode.Parse( "0.600000024" ); d["Components"]!.AsArray()[0]!["Opacity"] = JsonNode.Parse( "0.600000024" ); } );
+        string Refusal( ObjectState from, ObjectState to )
+        {
+            try { StateRules.ValidateChange( new Change( from.Id, from, to ) ); return null; }
+            catch ( InvalidOperationException ex ) { return ex.Message; }
+        }
+        assert( Refusal( before, echoed ) == null, "merge_validate_float_echo_of_unsupported_properties_is_not_a_change: " + Refusal( before, echoed ) );
+        var realTop = Edited( before, d => d["Mass"] = 0.61 );
+        assert( Refusal( before, realTop ) == "Unsupported GameObject property: Mass", "merge_validate_real_change_of_an_unsupported_property_is_still_refused: " + Refusal( before, realTop ) );
+        var realComponent = Edited( before, d => d["Components"]!.AsArray()[0]!["Opacity"] = 0.61 );
+        assert( Refusal( before, realComponent ) == "Unsupported inspector property: Sandbox.ModelRenderer.Opacity", "merge_validate_real_change_of_an_unsupported_component_field_is_still_refused: " + Refusal( before, realComponent ) );
     }
 
     // The runtime authority keeps its own stale-edit check; it compares object data too, so an editor echo of
