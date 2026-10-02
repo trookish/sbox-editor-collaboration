@@ -3664,11 +3664,16 @@ var first = Obj("first"); var second = Obj("second");
 authority.Subscribe(new() { Scene="scenes/test.scene", Objects=[first,second] });
 var a = Edit("A",new Change(first.Id,first,Rename(first,"A wins")));
 Assert(authority.Apply(a).Kind == "accepted", "first edit accepted");
-Assert(authority.Apply(Edit("B",new Change(first.Id,first,Rename(first,"B loses")))).Kind == "reject", "same-object concurrent edit rejected");
+var sameObjectReceipt = authority.Apply(Edit("B",new Change(first.Id,first,Rename(first,"B later wins"))));
+Assert(sameObjectReceipt.Kind == "accepted" && sameObjectReceipt.Merged && sameObjectReceipt.Notice == "Concurrent edits to \"A wins\" were combined; the later edit was kept for: Name." &&
+    authority.Scenes["scenes/test.scene"][first.Id].Data["Name"]!.GetValue<string>() == "B later wins",
+    "same-object concurrent edit of the same property is merged: the later edit wins and the clash is reported, not refused: " + sameObjectReceipt.Kind + " " + sameObjectReceipt.Error);
 var receipt = authority.Apply(a);
-Assert(receipt.Revision == 1 && journal.Count == 2, "replay deduplicated without journaling twice");
+Assert(receipt.Revision == 1 && journal.Count == 3, "replay deduplicated without journaling twice (the journal holds the seed, edit A and the merged edit B)");
 Assert(authority.Apply(Edit("B",new Change(second.Id,second,Rename(second,"independent")))).Kind == "accepted", "independent object edits merge");
-Assert(authority.Apply(Edit("B",new Change(first.Id,first,Rename(first,"stale")),new Change(second.Id,second,null))).Kind == "reject" && authority.Scenes["scenes/test.scene"].Count==2, "multi-object rejection is atomic");
+var atomicReceipt = authority.Apply(Edit("B",new Change(first.Id,first,Rename(first,"stale")),new Change(second.Id,null,second)));
+Assert(atomicReceipt.Kind == "reject" && atomicReceipt.Error.StartsWith("Conflict on " + second.Id, StringComparison.Ordinal) && authority.Scenes["scenes/test.scene"].Count==2 &&
+    authority.Scenes["scenes/test.scene"][first.Id].Data["Name"]!.GetValue<string>() == "B later wins", "multi-object rejection is atomic: the unmergeable creation of an existing id refuses the whole operation, including the mergeable change before it");
 var child = Obj("child",first.Id);
 Assert(authority.Apply(Edit("A",new Change(child.Id,null,child))).Kind == "accepted", "child creation");
 var currentFirst = authority.Scenes["scenes/test.scene"][first.Id];
@@ -6012,8 +6017,9 @@ var soloTint = soloAuthority.Apply( SoloEdit( "bot", SoloScript.Update( soloMove
 Assert( soloTint.Kind == "accepted", "a supported property change (renderer tint) is accepted: " + soloTint.Error );
 SoloScript.ApplyAccepted( soloKnown, soloTint.Changes );
 var soloStale = soloAuthority.Apply( SoloEdit( "bot", SoloScript.Update( soloCube, SoloScript.WithPosition( soloCube, "1,1,1" ) ) ) );
-Assert( soloStale.Kind == "reject" && soloStale.Error.Contains( "Conflict" ), "an edit built on stale state is refused, never silently applied: " + soloStale.Kind + " " + soloStale.Error );
-Assert( soloAuthority.Scenes["scenes/minimal.scene"][soloCube.Id].Data["Position"]!.GetValue<string>() == "50,60,70", "the refused stale edit changed nothing" );
+Assert( soloStale.Kind == "accepted" && soloStale.Merged && soloStale.Notice == "Concurrent edits to \"" + soloCube.Data["Name"]!.GetValue<string>() + "\" were combined; the later edit was kept for: Position.", "an edit built on stale state is merged per property and the clash is reported, never silently applied: " + soloStale.Kind + " " + soloStale.Error + " " + soloStale.Notice );
+Assert( soloAuthority.Scenes["scenes/minimal.scene"][soloCube.Id].Data["Position"]!.GetValue<string>() == "1,1,1" && StateRules.Equal( soloAuthority.Scenes["scenes/minimal.scene"][soloCube.Id], SoloScript.WithPosition( soloTinted, "1,1,1" ) ), "the merged stale edit moves only the position it changed and keeps the tint the host already held" );
+SoloScript.ApplyAccepted( soloKnown, soloStale.Changes );
 var soloHumanMove = soloAuthority.Apply( SoloEdit( "human", SoloScript.Update( soloKnown[soloBaseId.ToString()], SoloScript.WithPosition( soloKnown[soloBaseId.ToString()], "0,0,99" ) ) ) );
 Assert( soloHumanMove.Kind == "accepted", "another collaborator's edit to a different object goes through alongside the bot's" );
 SoloScript.ApplyAccepted( soloKnown, soloHumanMove.Changes );
@@ -6126,11 +6132,11 @@ async Task SoloBotRoundTripAsync()
         await PumpUntil( () => bot.AcceptedOwn == 3 && JsonNode.DeepEquals( observer.Known( "scenes/minimal.scene" )[cube.Id].Data, tinted.Data ), 8, "the other collaborator sees the property change" );
 
         bot.SendEdit( "scenes/minimal.scene", new[] { SoloScript.Update( cube, SoloScript.WithPosition( cube, "1,1,1" ) ) } );
-        await PumpUntil( () => bot.Rejects.Count == 1, 8, "a stale edit comes back as a refusal" );
-        Assert( bot.Rejects[0].Error.Contains( "Conflict" ) && observer.Known( "scenes/minimal.scene" )[cube.Id].Data["Position"]!.GetValue<string>() == "300,80,90", "the refused stale edit changed nothing for the other collaborator" );
+        await PumpUntil( () => bot.AcceptedOwn == 4 && observer.Known( "scenes/minimal.scene" )[cube.Id].Data["Position"]!.GetValue<string>() == "1,1,1", 8, "a stale edit of one property is merged by the host and the other collaborator sees it" );
+        Assert( bot.Rejects.Count == 0 && JsonNode.DeepEquals( observer.Known( "scenes/minimal.scene" )[cube.Id].Data, SoloScript.WithPosition( tinted, "1,1,1" ).Data ), "the merged stale edit moved only the position and kept the tint for the other collaborator" );
 
         bot.SendEdit( "scenes/minimal.scene", new[] { SoloScript.Delete( tinted ) } );
-        await PumpUntil( () => bot.AcceptedOwn == 4 && !observer.Known( "scenes/minimal.scene" ).ContainsKey( cube.Id ), 8, "the other collaborator sees the cube deleted" );
+        await PumpUntil( () => bot.AcceptedOwn == 5 && !observer.Known( "scenes/minimal.scene" ).ContainsKey( cube.Id ), 8, "the other collaborator sees the cube deleted (a deletion built on an older state still wins)" );
         Assert( observer.Known( "scenes/minimal.scene" ).Count == 1 && observer.Known( "scenes/minimal.scene" ).ContainsKey( baseId.ToString() ) && bot.PendingCount == 0, "the scene is back to exactly the original object, with no edit left unanswered" );
 
         bot.Leave();

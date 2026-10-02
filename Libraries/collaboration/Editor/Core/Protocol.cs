@@ -68,6 +68,20 @@ public sealed class Packet
 
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string ProjectManifest { get; set; }
+
+    /// <summary>
+    /// A formal sentence for the people in the session when the host combined concurrent edits (or let one edit replace another);
+    /// null when nothing needs saying. Additive: omitted from the wire when unset, ignored by peers that predate it.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string Notice { get; set; }
+
+    /// <summary>
+    /// True on an accepted packet when the host applied something different from what the sender sent, so the sender knows to
+    /// take the host's state rather than keep its own. Additive: omitted from the wire when false.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool Merged { get; set; }
 }
 
 public static class Protocol
@@ -177,7 +191,89 @@ public static class StateRules
 
     public static bool Equal(ObjectState a, ObjectState b)
     {
-        return ((object)a == null) ? ((object)b == null) : ((object)b != null && a.Id == b.Id && a.Parent == b.Parent && JsonNode.DeepEquals(a.Data, b.Data));
+        return ((object)a == null) ? ((object)b == null) : ((object)b != null && a.Id == b.Id && a.Parent == b.Parent && ValuesEqual(a.Data, b.Data));
+    }
+
+    /// <summary>
+    /// Structural equality of two scene values, tolerant of the engine's 32-bit float round trip. It matches
+    /// <see cref="JsonNode.DeepEquals"/> (objects equal whatever their key order but only with the same key set, arrays element by element in
+    /// order, null equal to null, strings and booleans exact) except for numbers. Two numbers that both read as a
+    /// <c>long</c> are compared as longs, so integers above 2^53 stay exact; otherwise two numbers are equal when they are
+    /// the same 32-bit float, which makes <c>0.6</c> equal to <c>0.600000024</c> (what the editor writes back) and <c>1</c>
+    /// equal to <c>1.0</c>. Without this every echo of a float property looked like an edit by somebody else.
+    /// </summary>
+    public static bool ValuesEqual( JsonNode a, JsonNode b )
+    {
+        if ( (object)a == (object)b )
+        {
+            return true;
+        }
+        if ( a is null || b is null )
+        {
+            return false;
+        }
+        if ( a is JsonObject objectA )
+        {
+            if ( b is not JsonObject objectB || objectA.Count != objectB.Count )
+            {
+                return false;
+            }
+            foreach ( KeyValuePair<string, JsonNode> member in objectA )
+            {
+                if ( !objectB.TryGetPropertyValue( member.Key, out JsonNode other ) || !ValuesEqual( member.Value, other ) )
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+        if ( a is JsonArray arrayA )
+        {
+            if ( b is not JsonArray arrayB || arrayA.Count != arrayB.Count )
+            {
+                return false;
+            }
+            for ( int i = 0; i < arrayA.Count; i++ )
+            {
+                if ( !ValuesEqual( arrayA[i], arrayB[i] ) )
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+        if ( b is JsonObject || b is JsonArray )
+        {
+            return false;
+        }
+        if ( a.GetValueKind() == System.Text.Json.JsonValueKind.Number && b.GetValueKind() == System.Text.Json.JsonValueKind.Number )
+        {
+            return NumbersEqual( a, b );
+        }
+        return JsonNode.DeepEquals( a, b );
+    }
+
+    // Reads the numbers through their JSON text, which is the same whether a node was parsed off the wire or built in code
+    // (a JsonValue made from an int does not report TryGetValue<long>). Exactly equal numbers are settled first, so the
+    // common unchanged case never parses anything.
+    private static bool NumbersEqual( JsonNode a, JsonNode b )
+    {
+        if ( JsonNode.DeepEquals( a, b ) )
+        {
+            return true;
+        }
+        string textA = a.ToJsonString();
+        string textB = b.ToJsonString();
+        System.Globalization.CultureInfo invariant = System.Globalization.CultureInfo.InvariantCulture;
+        if ( long.TryParse( textA, System.Globalization.NumberStyles.AllowLeadingSign, invariant, out long longA ) && long.TryParse( textB, System.Globalization.NumberStyles.AllowLeadingSign, invariant, out long longB ) )
+        {
+            return longA == longB;
+        }
+        if ( double.TryParse( textA, System.Globalization.NumberStyles.Float, invariant, out double doubleA ) && double.TryParse( textB, System.Globalization.NumberStyles.Float, invariant, out double doubleB ) )
+        {
+            return (float)doubleA == (float)doubleB;
+        }
+        return false;
     }
 
     public static Dictionary<string, ObjectState> Map(IEnumerable<ObjectState> objects)
@@ -241,7 +337,7 @@ public static class StateRules
         }
         foreach (string item3 in c.Before.Data.Select((KeyValuePair<string, JsonNode> x) => x.Key).Union(c.After.Data.Select((KeyValuePair<string, JsonNode> x) => x.Key)))
         {
-            if (JsonNode.DeepEquals(c.Before.Data[item3], c.After.Data[item3]) || ObjectFields.Contains(item3))
+            if (ValuesEqual(c.Before.Data[item3], c.After.Data[item3]) || ObjectFields.Contains(item3))
             {
                 continue;
             }
@@ -262,7 +358,7 @@ public static class StateRules
                 string value = jsonObject2["__type"].GetValue<string>();
                 foreach (string item4 in jsonObject2.Select((KeyValuePair<string, JsonNode> x) => x.Key).Union(jsonObject3.Select((KeyValuePair<string, JsonNode> x) => x.Key)))
                 {
-                    if (!JsonNode.DeepEquals(jsonObject2[item4], jsonObject3[item4]))
+                    if (!ValuesEqual(jsonObject2[item4], jsonObject3[item4]))
                     {
                         if (!ComponentFields.TryGetValue(value, out var value2) || !value2.Contains(item4))
                         {
@@ -372,32 +468,43 @@ public sealed class Authority
                 throw new InvalidOperationException("Duplicate object in operation");
             }
             Dictionary<string, ObjectState> dictionary = new Dictionary<string, ObjectState>(value2);
+            List<Change> applied = new List<Change>();
+            List<string> notices = new List<string>();
             foreach (Change change in p.Changes)
             {
                 StateRules.ValidateChange(change);
-                if (!StateRules.Equal(value2.GetValueOrDefault(change.Id), change.Before))
+                Change change2 = Reconcile(change, value2.GetValueOrDefault(change.Id), notices);
+                if ((object)change2.After == null)
                 {
-                    throw new InvalidOperationException("Conflict on " + change.Id + ": first accepted edit wins. Your edit is retained in recovery.");
-                }
-                if ((object)change.After == null)
-                {
-                    dictionary.Remove(change.Id);
+                    dictionary.Remove(change2.Id);
                 }
                 else
                 {
-                    dictionary[change.Id] = change.After;
+                    dictionary[change2.Id] = change2.After;
                 }
+                applied.Add(change2);
             }
             StateRules.ValidateGraph(dictionary);
+            // The packet carries what the host applied, not what the sender sent: every follower's Before is then the state it
+            // already holds, and the journal replays to the host's scene. Merged is set when the host's result is not simply the
+            // sender's edit: some applied After differs from the one sent, or the outcome needed a notice (a clash resolved in the
+            // sender's favour still leaves After equal to the one sent, yet the people in the session must be told).
+            bool merged = notices.Count > 0;
+            for (int i = 0; i < applied.Count; i++)
+            {
+                merged |= !StateRules.Equal(applied[i].After, p.Changes[i].After);
+            }
             value = new Packet
             {
                 Kind = "accepted",
                 Id = p.Id,
                 Peer = p.Peer,
                 Scene = p.Scene,
-                Changes = p.Changes,
+                Changes = applied,
                 Revision = Revision + 1,
-                Final = p.Final
+                Final = p.Final,
+                Merged = merged,
+                Notice = (notices.Count == 0) ? null : string.Join(" ", notices)
             };
             persist(value);
             Revision++;
@@ -415,5 +522,66 @@ public sealed class Authority
         }
         receipts[key] = value;
         return value;
+    }
+
+    // Decides what the host applies for one incoming change, given the object as the host holds it now (null if absent). An edit
+    // built on the host's current state is applied as sent. Otherwise somebody else changed the object in the meantime, and the
+    // rule is: the later edit (the one processed second) wins, per property, and a clash is reported in `notices` rather than
+    // refused. Only the unambiguous cases are resolved; anything else keeps the conflict refusal.
+    private static Change Reconcile(Change change, ObjectState current, List<string> notices)
+    {
+        if (StateRules.Equal(current, change.Before))
+        {
+            return change;
+        }
+        // A creation of an id that already exists is two objects claiming one identity, not an edit to merge.
+        if ((object)change.Before == null)
+        {
+            throw Conflict(change);
+        }
+        Change applied;
+        if ((object)change.After == null)
+        {
+            // Deleting an object that someone edited meanwhile: the deletion wins. Deleting one that is already gone has
+            // nothing to apply, so it stays a conflict.
+            if ((object)current == null)
+            {
+                throw Conflict(change);
+            }
+            applied = new Change(change.Id, current, null);
+            notices.Add("The later deletion of \"" + DisplayName(current) + "\" was kept; a concurrent edit to the same object was discarded.");
+        }
+        else if ((object)current == null)
+        {
+            // Editing an object that was deleted meanwhile: the later edit wins and the object comes back as the editor left it.
+            applied = new Change(change.Id, null, change.After);
+            notices.Add("A concurrent deletion of \"" + DisplayName(change.After) + "\" was overridden; the later edit was kept and the object was restored.");
+        }
+        else
+        {
+            if (!PropertyMerge.TryMerge(current, change.Before, change.After, out ObjectState merged, out List<string> clashed))
+            {
+                throw Conflict(change);
+            }
+            applied = new Change(change.Id, current, merged);
+            if (clashed.Count > 0)
+            {
+                notices.Add("Concurrent edits to \"" + DisplayName(current) + "\" were combined; the later edit was kept for: " + string.Join(", ", clashed) + ".");
+            }
+        }
+        // The applied change is what every peer will see, so it passes the same rules as an edit sent in one piece.
+        StateRules.ValidateChange(applied);
+        return applied;
+    }
+
+    private static InvalidOperationException Conflict(Change change)
+    {
+        return new InvalidOperationException("Conflict on " + change.Id + ": first accepted edit wins. Your edit is retained in recovery.");
+    }
+
+    // The name a person recognises the object by; the id when it has no readable name.
+    private static string DisplayName(ObjectState state)
+    {
+        return (state.Data?["Name"] is JsonValue jsonValue && jsonValue.TryGetValue(out string value) && !string.IsNullOrEmpty(value)) ? value : state.Id;
     }
 }
