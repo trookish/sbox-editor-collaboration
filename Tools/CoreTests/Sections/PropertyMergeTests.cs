@@ -72,6 +72,9 @@ static class PropertyMergeTests
     {
         FloatTolerance( assert );
         ThreeWayMerge( assert );
+        AuthorityMerge( assert );
+        PacketFields( assert );
+        JournalReplay( assert );
     }
 
     // ---- Part 4: float tolerance ------------------------------------------------------------------
@@ -430,5 +433,285 @@ static class PropertyMergeTests
             try { StateRules.ValidateChange( applied ); } catch ( Exception ) { valid = false; }
             assert( valid, "merge_result_is_accepted_by_ValidateChange" );
         }
+    }
+
+    // ---- Part 3: the host authority -----------------------------------------------------------------
+
+    static ObjectState HostState( Authority authority, string id ) => authority.Scenes[Scene].GetValueOrDefault( id );
+
+    static string Sentence( string name, string fields ) => "Concurrent edits to \"" + name + "\" were combined; the later edit was kept for: " + fields + ".";
+
+    static void AuthorityMerge( Action<bool, string> assert )
+    {
+        // The bug as the user met it: peer A renames the cube, peer B (still holding the original) moves it.
+        {
+            var authority = new Authority( _ => { } );
+            var original = Cube( "Cube", "0,0,0" );
+            authority.Subscribe( new Packet { Kind = "subscribe", Scene = Scene, Objects = new List<ObjectState> { original } } );
+            var rename = authority.Apply( Edit( "peer-a", new Change( original.Id, original, With( original, "Name", "Renamed" ) ) ) );
+            assert( rename.Kind == "accepted", "merge_repro_first_edit_accepted: " + rename.Error );
+            var move = authority.Apply( Edit( "peer-b", new Change( original.Id, original, With( original, "Position", "10,0,0" ) ) ) );
+            assert( move.Kind == "accepted", "merge_repro: a second person's edit to a different property is accepted, not a conflict: " + move.Kind + " " + move.Error );
+        }
+
+        // Both edits' effects are present, the receipt carries what the host applied, and the combination is flagged.
+        {
+            var original = Cube( "Cube", "0,0,0", "", Renderer() );
+            var authority = Seeded( out var journal, original );
+            var renamed = With( original, "Name", "Renamed" );
+            var first = authority.Apply( Edit( "peer-a", new Change( original.Id, original, renamed ) ) );
+            assert( first.Kind == "accepted" && !first.Merged && first.Notice == null && ReferenceEquals( first.Changes[0].After, renamed ), "merge_fast_path_is_untouched_and_not_flagged" );
+            var second = authority.Apply( Edit( "peer-b", new Change( original.Id, original, With( original, "Position", "10,0,0" ) ) ) );
+            var host = HostState( authority, original.Id );
+            assert( second.Kind == "accepted" && Text( host, "Name" ) == "Renamed" && Text( host, "Position" ) == "10,0,0", "merge_both_edits_are_present_in_the_hosts_scene: " + second.Error );
+            assert( second.Merged && second.Notice == null, "merge_clean_merge_is_flagged_merged_without_a_notice: " + second.Merged + " " + second.Notice );
+            assert( StateRules.Equal( second.Changes[0].Before, renamed ) && StateRules.Equal( second.Changes[0].After, host ), "merge_receipt_carries_the_applied_change_so_followers_before_matches_what_they_hold" );
+            assert( second.Revision == 2 && authority.Revision == 2 && journal.Count == 3 && ReferenceEquals( journal[2], second ), "merge_revision_advances_and_the_applied_packet_is_the_one_persisted" );
+        }
+
+        // Same property: the later edit wins, the clash is reported, not refused.
+        {
+            var original = Cube( "Cube", "0,0,0" );
+            var authority = Seeded( out _, original );
+            authority.Apply( Edit( "peer-a", new Change( original.Id, original, With( original, "Position", "5,0,0" ) ) ) );
+            var later = authority.Apply( Edit( "peer-b", new Change( original.Id, original, With( original, "Position", "10,0,0" ) ) ) );
+            assert( later.Kind == "accepted" && later.Merged && Text( HostState( authority, original.Id ), "Position" ) == "10,0,0", "merge_same_field_clash_is_accepted_and_the_later_edit_wins: " + later.Error );
+            assert( later.Notice == Sentence( "Cube", "Position" ), "merge_same_field_clash_notice_names_position: " + later.Notice );
+        }
+
+        // Component clash and field clash together, in one sentence.
+        {
+            var original = Cube( "Cube", "0,0,0", "", Renderer( "1,1,1,1" ) );
+            var authority = Seeded( out _, original );
+            var aliceEdit = Edited( With( original, "Position", "5,0,0" ), d => d["Components"]!.AsArray()[0]!["Tint"] = "1,0,0,1" );
+            var bobEdit = Edited( With( original, "Position", "9,0,0" ), d => d["Components"]!.AsArray()[0]!["Tint"] = "0,0,1,1" );
+            authority.Apply( Edit( "alice", new Change( original.Id, original, aliceEdit ) ) );
+            var later = authority.Apply( Edit( "bob", new Change( original.Id, original, bobEdit ) ) );
+            assert( later.Kind == "accepted" && later.Notice == Sentence( "Cube", "Position, ModelRenderer.Tint" ), "merge_field_and_component_clashes_are_listed_together: " + later.Kind + " " + later.Error + " " + later.Notice );
+            assert( StateRules.Equal( HostState( authority, original.Id ), bobEdit ), "merge_later_edit_wins_every_clashing_property" );
+        }
+
+        // Both people made the identical edit: accepted, nothing to report, nothing different applied.
+        {
+            var original = Cube( "Cube", "0,0,0" );
+            var authority = Seeded( out _, original );
+            var edit = With( original, "Position", "10,0,0" );
+            authority.Apply( Edit( "peer-a", new Change( original.Id, original, edit ) ) );
+            var duplicate = authority.Apply( Edit( "peer-b", new Change( original.Id, original, edit ) ) );
+            assert( duplicate.Kind == "accepted" && !duplicate.Merged && duplicate.Notice == null, "merge_identical_simultaneous_edits_are_accepted_without_a_notice: " + duplicate.Kind + " " + duplicate.Error + " " + duplicate.Notice );
+        }
+
+        // The notice names the object by its id when it has no readable name.
+        {
+            var original = Cube( "x", "0,0,0" );
+            original.Data.Remove( "Name" );
+            var authority = Seeded( out _, original );
+            authority.Apply( Edit( "peer-a", new Change( original.Id, original, With( original, "Position", "5,0,0" ) ) ) );
+            var later = authority.Apply( Edit( "peer-b", new Change( original.Id, original, With( original, "Position", "10,0,0" ) ) ) );
+            assert( later.Notice == Sentence( original.Id, "Position" ), "merge_notice_falls_back_to_the_object_id: " + later.Notice );
+        }
+
+        // Delete against edit, both ways.
+        {
+            var original = Cube( "Cube", "0,0,0" );
+            var authority = Seeded( out _, original );
+            var renamed = With( original, "Name", "Renamed" );
+            authority.Apply( Edit( "peer-a", new Change( original.Id, original, renamed ) ) );
+            var deletion = authority.Apply( Edit( "peer-b", new Change( original.Id, original, null ) ) );
+            assert( deletion.Kind == "accepted" && !authority.Scenes[Scene].ContainsKey( original.Id ), "merge_deletion_wins_over_a_concurrent_edit: " + deletion.Kind + " " + deletion.Error );
+            assert( StateRules.Equal( deletion.Changes[0].Before, renamed ) && deletion.Changes[0].After == null, "merge_deletion_receipt_carries_the_hosts_state_as_before" );
+            assert( deletion.Notice == "The later deletion of \"Renamed\" was kept; a concurrent edit to the same object was discarded.", "merge_deletion_notice_says_the_deletion_replaced_an_edit: " + deletion.Notice );
+        }
+        {
+            var original = Cube( "Cube", "0,0,0" );
+            var authority = Seeded( out var journal, original );
+            authority.Apply( Edit( "peer-a", new Change( original.Id, original, null ) ) );
+            var edited = With( original, "Name", "Edited" );
+            var restored = authority.Apply( Edit( "peer-b", new Change( original.Id, original, edited ) ) );
+            assert( restored.Kind == "accepted" && StateRules.Equal( HostState( authority, original.Id ), edited ), "merge_edit_of_an_object_deleted_meanwhile_restores_it_with_the_later_edit: " + restored.Kind + " " + restored.Error );
+            assert( restored.Changes[0].Before == null && StateRules.Equal( restored.Changes[0].After, edited ), "merge_restore_is_journaled_as_a_creation" );
+            assert( restored.Notice == "A concurrent deletion of \"Edited\" was overridden; the later edit was kept and the object was restored.", "merge_restore_notice: " + restored.Notice );
+            var gone = Cube( "Gone", "0,0,0" );
+            var second = Seeded( out _, gone );
+            second.Apply( Edit( "peer-a", new Change( gone.Id, gone, null ) ) );
+            var again = second.Apply( Edit( "peer-b", new Change( gone.Id, gone, null ) ) );
+            assert( again.Kind == "reject" && again.Error.StartsWith( "Conflict on " + gone.Id, StringComparison.Ordinal ), "merge_deleting_an_already_deleted_object_stays_a_conflict: " + again.Kind + " " + again.Error );
+        }
+
+        // Creation of an id that already exists keeps the conflict error, and changes nothing.
+        {
+            var original = Cube( "Cube", "0,0,0" );
+            var authority = Seeded( out var journal, original );
+            var revision = authority.Revision;
+            var duplicate = authority.Apply( Edit( "peer-b", new Change( original.Id, null, With( original, "Name", "Again" ) ) ) );
+            assert( duplicate.Kind == "reject" && duplicate.Error.StartsWith( "Conflict on " + original.Id, StringComparison.Ordinal ), "merge_creation_of_an_existing_id_is_still_a_conflict: " + duplicate.Kind + " " + duplicate.Error );
+            assert( authority.Revision == revision && journal.Count == 1 && StateRules.Equal( HostState( authority, original.Id ), original ), "merge_refused_creation_changes_nothing" );
+        }
+
+        // An edit that cannot be merged safely keeps the conflict error as well.
+        {
+            var renderer = Renderer( "1,1,1,1" );
+            renderer.Remove( "__guid" );
+            var original = Cube( "Cube", "0,0,0", "", Renderer( "1,1,1,1" ) );
+            var authority = Seeded( out var journal, original );
+            // The sender's copy of the object is one whose component carries no guid (a damaged or foreign copy).
+            var staleBefore = Cube( "Cube", "0,0,0", "", renderer ) with { Id = original.Id };
+            staleBefore.Data["__guid"] = original.Id;
+            var staleAfter = Edited( staleBefore, d => d["Components"]!.AsArray()[0]!["Tint"] = "0,0,1,1" );
+            authority.Apply( Edit( "peer-a", new Change( original.Id, original, With( original, "Name", "Renamed" ) ) ) );
+            var revision = authority.Revision;
+            var count = journal.Count;
+            var refused = authority.Apply( Edit( "peer-b", new Change( original.Id, staleBefore, staleAfter ) ) );
+            assert( refused.Kind == "reject" && refused.Error.StartsWith( "Conflict on " + original.Id, StringComparison.Ordinal ), "merge_unmergeable_change_falls_back_to_the_conflict_error: " + refused.Kind + " " + refused.Error );
+            assert( authority.Revision == revision && journal.Count == count && Text( HostState( authority, original.Id ), "Name" ) == "Renamed", "merge_unmergeable_change_leaves_the_scene_and_revision_unchanged" );
+        }
+
+        // A merged result that breaks the graph is a reject with the graph error and changes nothing.
+        {
+            var parent = Cube( "Parent", "0,0,0" );
+            var child = Cube( "Child", "0,0,0" );
+            var authority = Seeded( out var journal, parent, child );
+            authority.Apply( Edit( "peer-a", new Change( child.Id, child, With( child, "Name", "Renamed" ) ) ) );
+            authority.Apply( Edit( "peer-c", new Change( parent.Id, parent, null ) ) );
+            var revision = authority.Revision;
+            var count = journal.Count;
+            var before = HostState( authority, child.Id );
+            var reparent = authority.Apply( Edit( "peer-b", new Change( child.Id, child, child with { Parent = parent.Id } ) ) );
+            assert( reparent.Kind == "reject" && reparent.Error == "Parent does not exist", "merge_reparent_under_a_deleted_object_is_rejected_with_the_graph_error: " + reparent.Kind + " " + reparent.Error );
+            assert( authority.Revision == revision && journal.Count == count && StateRules.Equal( HostState( authority, child.Id ), before ) && authority.Scenes[Scene].Count == 1, "merge_graph_rejection_leaves_scenes_and_revision_unchanged" );
+        }
+
+        // Several objects in one operation: all are applied or none, and notices are joined with a space.
+        {
+            var one = Cube( "One", "0,0,0" );
+            var two = Cube( "Two", "0,0,0" );
+            var authority = Seeded( out _, one, two );
+            authority.Apply( Edit( "peer-a", new Change( one.Id, one, With( one, "Position", "1,0,0" ) ), new Change( two.Id, two, With( two, "Position", "2,0,0" ) ) ) );
+            var receipt = authority.Apply( Edit( "peer-b", new Change( one.Id, one, With( one, "Position", "7,0,0" ) ), new Change( two.Id, two, With( two, "Position", "8,0,0" ) ) ) );
+            assert( receipt.Kind == "accepted" && receipt.Notice == Sentence( "One", "Position" ) + " " + Sentence( "Two", "Position" ), "merge_notices_of_several_objects_are_joined_with_a_space: " + receipt.Notice );
+
+            var other = Cube( "Other", "0,0,0" );
+            var atomic = Seeded( out _, one, other );
+            atomic.Apply( Edit( "peer-a", new Change( one.Id, one, With( one, "Name", "Renamed" ) ) ) );
+            var mixed = atomic.Apply( Edit( "peer-b", new Change( one.Id, one, With( one, "Position", "3,0,0" ) ), new Change( other.Id, null, other ) ) );
+            assert( mixed.Kind == "reject" && Text( HostState( atomic, one.Id ), "Position" ) == "0,0,0" && Text( HostState( atomic, one.Id ), "Name" ) == "Renamed", "merge_one_unmergeable_change_rejects_the_whole_operation_including_merges: " + mixed.Kind );
+        }
+
+        // Validation of the sender's own change still comes first: a merge never lets an unsupported property through.
+        {
+            var original = Cube( "Cube", "0,0,0" );
+            var authority = Seeded( out _, original );
+            authority.Apply( Edit( "peer-a", new Change( original.Id, original, With( original, "Name", "Renamed" ) ) ) );
+            var unsupported = authority.Apply( Edit( "peer-b", new Change( original.Id, original, With( original, "NetworkMode", 3 ) ) ) );
+            assert( unsupported.Kind == "reject" && unsupported.Error.Contains( "Unsupported GameObject property", StringComparison.Ordinal ) && !HostState( authority, original.Id ).Data.ContainsKey( "NetworkMode" ), "merge_unsupported_property_is_still_refused_on_a_stale_edit: " + unsupported.Kind + " " + unsupported.Error );
+        }
+
+        // Resending the same packet id returns the identical receipt and does nothing twice.
+        {
+            var original = Cube( "Cube", "0,0,0" );
+            var authority = Seeded( out var journal, original );
+            authority.Apply( Edit( "peer-a", new Change( original.Id, original, With( original, "Position", "5,0,0" ) ) ) );
+            var packet = Edit( "peer-b", new Change( original.Id, original, With( original, "Position", "10,0,0" ) ) );
+            var receipt = authority.Apply( packet );
+            var revision = authority.Revision;
+            var count = journal.Count;
+            var again = authority.Apply( packet );
+            assert( ReferenceEquals( receipt, again ) && again.Merged && again.Notice != null && authority.Revision == revision && journal.Count == count, "merge_resent_packet_returns_the_identical_receipt" );
+            var refused = authority.Apply( Edit( "peer-c", new Change( original.Id, null, original ) ) );
+            assert( ReferenceEquals( refused, authority.Apply( new Packet { Kind = "edit", Id = refused.Id, Peer = "peer-c", Scene = Scene, Changes = new List<Change>() } ) ), "merge_resent_reject_returns_the_identical_receipt" );
+        }
+    }
+
+    // ---- Packet fields -----------------------------------------------------------------------------
+
+    static void PacketFields( Action<bool, string> assert )
+    {
+        // Older peers never wrote Notice or Merged: a packet without them reads as an unmerged one.
+        const string legacy = "{\"Kind\":\"accepted\",\"Id\":\"op\",\"Peer\":\"p\",\"Scene\":\"scenes/test.scene\",\"Revision\":3,\"Final\":true,\"Changes\":[]}";
+        var parsed = JsonSerializer.Deserialize<Packet>( System.Text.Encoding.UTF8.GetBytes( legacy ) );
+        assert( parsed != null && parsed.Kind == "accepted" && !parsed.Merged && parsed.Notice == null && parsed.Revision == 3, "merge_packet_without_the_new_fields_reads_as_unmerged" );
+
+        // Unset, they are not on the wire at all, so a peer that rejects unknown fields never sees them.
+        var plain = new Packet { Kind = "accepted", Id = "op", Peer = "p", Scene = Scene, Changes = new List<Change>() };
+        var plainJson = System.Text.Encoding.UTF8.GetString( JsonSerializer.SerializeToUtf8Bytes( plain ) );
+        assert( !plainJson.Contains( "Notice", StringComparison.Ordinal ) && !plainJson.Contains( "Merged", StringComparison.Ordinal ), "merge_unset_fields_are_omitted_from_the_wire: " + plainJson );
+
+        // Set, they survive the very serializer calls the transport and the journal use.
+        var original = Cube( "Cube", "0,0,0" );
+        var authority = Seeded( out _, original );
+        authority.Apply( Edit( "peer-a", new Change( original.Id, original, With( original, "Position", "5,0,0" ) ) ) );
+        var receipt = authority.Apply( Edit( "peer-b", new Change( original.Id, original, With( original, "Position", "10,0,0" ) ) ) );
+        var bytes = JsonSerializer.SerializeToUtf8Bytes( receipt );
+        var text = System.Text.Encoding.UTF8.GetString( bytes );
+        var round = JsonSerializer.Deserialize<Packet>( bytes );
+        assert( text.Contains( "\"Merged\":true", StringComparison.Ordinal ) && text.Contains( "\"Notice\":", StringComparison.Ordinal ), "merge_set_fields_are_written_to_the_wire: " + text );
+        assert( round.Merged && round.Notice == receipt.Notice && round.Kind == "accepted" && round.Changes.Count == 1 && StateRules.Equal( round.Changes[0].After, receipt.Changes[0].After ) && StateRules.Equal( round.Changes[0].Before, receipt.Changes[0].Before ), "merge_set_fields_round_trip_through_the_transport_serializer" );
+        var journalLine = JsonSerializer.Serialize( receipt );
+        assert( JsonSerializer.Deserialize<Packet>( journalLine ).Notice == receipt.Notice, "merge_set_fields_round_trip_through_the_journal_serializer" );
+        assert( Protocol.CurrentVersion == 4, "merge_protocol_version_is_unchanged" );
+    }
+
+    // ---- Journal replay ----------------------------------------------------------------------------
+
+    // The host's journal is one JSON packet per line: a "seed" for a scene's first state and an "accepted" packet per
+    // operation. A recovery that replays it applies each accepted change's After (or removes the object) in order;
+    // every Before must equal the state the replay holds at that point, or the journal contradicts itself.
+    static Dictionary<string, ObjectState> Replay( IEnumerable<Packet> journal, out bool consistent )
+    {
+        consistent = true;
+        var scene = new Dictionary<string, ObjectState>();
+        foreach ( var line in journal.Select( x => JsonSerializer.Serialize( x ) ) )
+        {
+            var packet = JsonSerializer.Deserialize<Packet>( line );
+            if ( packet.Kind == "seed" )
+            {
+                scene = StateRules.Map( packet.Objects );
+            }
+            else if ( packet.Kind == "accepted" )
+            {
+                foreach ( var change in packet.Changes )
+                {
+                    consistent &= StateRules.Equal( scene.GetValueOrDefault( change.Id ), change.Before );
+                    if ( change.After == null )
+                    {
+                        scene.Remove( change.Id );
+                    }
+                    else
+                    {
+                        scene[change.Id] = change.After;
+                    }
+                }
+            }
+        }
+        return scene;
+    }
+
+    static void JournalReplay( Action<bool, string> assert )
+    {
+        var x0 = Cube( "X", "0,0,0", "", Renderer( "1,1,1,1" ) );
+        var y0 = Cube( "Y", "0,0,0" );
+        var z0 = Cube( "Z", "0,0,0" );
+        var authority = Seeded( out var journal, x0, y0, z0 );
+
+        // X: a rename, then a stale move (clean merge), then a stale move of the same property (clash).
+        var rename = authority.Apply( Edit( "a", new Change( x0.Id, x0, With( x0, "Name", "X renamed" ) ) ) );
+        var move = authority.Apply( Edit( "b", new Change( x0.Id, x0, With( x0, "Position", "4,0,0" ) ) ) );
+        var clash = authority.Apply( Edit( "c", new Change( x0.Id, x0, Edited( With( x0, "Position", "9,0,0" ), d => d["Components"]!.AsArray()[0]!["Tint"] = "0,1,0,1" ) ) ) );
+        // Y: renamed, then deleted by somebody still holding the original (the deletion wins).
+        var yRename = authority.Apply( Edit( "d", new Change( y0.Id, y0, With( y0, "Name", "Y renamed" ) ) ) );
+        var yDelete = authority.Apply( Edit( "e", new Change( y0.Id, y0, null ) ) );
+        // Z: deleted, then edited by somebody still holding the original (the edit restores it).
+        var zDelete = authority.Apply( Edit( "f", new Change( z0.Id, z0, null ) ) );
+        var zRestore = authority.Apply( Edit( "g", new Change( z0.Id, z0, With( z0, "Name", "Z restored" ) ) ) );
+        var receipts = new[] { rename, move, clash, yRename, yDelete, zDelete, zRestore };
+        assert( receipts.All( x => x.Kind == "accepted" ), "merge_replay_scenario_is_all_accepted: " + string.Join( ",", receipts.Select( x => x.Kind + ":" + x.Error ) ) );
+        assert( !yRename.Merged && move.Merged && clash.Merged && yDelete.Notice != null && zRestore.Notice != null, "merge_replay_scenario_exercises_merge_clash_delete_and_restore" );
+
+        var replayed = Replay( journal, out var consistent );
+        assert( consistent, "merge_replaying_the_journal_finds_every_before_equal_to_the_state_it_holds" );
+        assert( StateRules.Diff( replayed, authority.Scenes[Scene] ).Count == 0 && replayed.Count == authority.Scenes[Scene].Count, "merge_replaying_the_persisted_packets_reproduces_the_hosts_scene" );
+        assert( replayed.ContainsKey( x0.Id ) && !replayed.ContainsKey( y0.Id ) && replayed.ContainsKey( z0.Id ), "merge_replayed_scene_has_the_surviving_objects_only" );
+        var replayedX = replayed[x0.Id];
+        assert( Text( replayedX, "Name" ) == "X renamed" && Text( replayedX, "Position" ) == "9,0,0" && Component( replayedX, 0 )["Tint"]!.GetValue<string>() == "0,1,0,1", "merge_replayed_object_carries_every_combined_edit" );
     }
 }

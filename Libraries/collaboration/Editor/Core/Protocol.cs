@@ -68,6 +68,20 @@ public sealed class Packet
 
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string ProjectManifest { get; set; }
+
+    /// <summary>
+    /// A formal sentence for the people in the session when the host combined concurrent edits (or let one edit replace another);
+    /// null when nothing needs saying. Additive: omitted from the wire when unset, ignored by peers that predate it.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string Notice { get; set; }
+
+    /// <summary>
+    /// True on an accepted packet when the host applied something different from what the sender sent, so the sender knows to
+    /// take the host's state rather than keep its own. Additive: omitted from the wire when false.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool Merged { get; set; }
 }
 
 public static class Protocol
@@ -454,32 +468,43 @@ public sealed class Authority
                 throw new InvalidOperationException("Duplicate object in operation");
             }
             Dictionary<string, ObjectState> dictionary = new Dictionary<string, ObjectState>(value2);
+            List<Change> applied = new List<Change>();
+            List<string> notices = new List<string>();
             foreach (Change change in p.Changes)
             {
                 StateRules.ValidateChange(change);
-                if (!StateRules.Equal(value2.GetValueOrDefault(change.Id), change.Before))
+                Change change2 = Reconcile(change, value2.GetValueOrDefault(change.Id), notices);
+                if ((object)change2.After == null)
                 {
-                    throw new InvalidOperationException("Conflict on " + change.Id + ": first accepted edit wins. Your edit is retained in recovery.");
-                }
-                if ((object)change.After == null)
-                {
-                    dictionary.Remove(change.Id);
+                    dictionary.Remove(change2.Id);
                 }
                 else
                 {
-                    dictionary[change.Id] = change.After;
+                    dictionary[change2.Id] = change2.After;
                 }
+                applied.Add(change2);
             }
             StateRules.ValidateGraph(dictionary);
+            // The packet carries what the host applied, not what the sender sent: every follower's Before is then the state it
+            // already holds, and the journal replays to the host's scene. Merged is set when the host's result is not simply the
+            // sender's edit: some applied After differs from the one sent, or the outcome needed a notice (a clash resolved in the
+            // sender's favour still leaves After equal to the one sent, yet the people in the session must be told).
+            bool merged = notices.Count > 0;
+            for (int i = 0; i < applied.Count; i++)
+            {
+                merged |= !StateRules.Equal(applied[i].After, p.Changes[i].After);
+            }
             value = new Packet
             {
                 Kind = "accepted",
                 Id = p.Id,
                 Peer = p.Peer,
                 Scene = p.Scene,
-                Changes = p.Changes,
+                Changes = applied,
                 Revision = Revision + 1,
-                Final = p.Final
+                Final = p.Final,
+                Merged = merged,
+                Notice = (notices.Count == 0) ? null : string.Join(" ", notices)
             };
             persist(value);
             Revision++;
@@ -497,5 +522,66 @@ public sealed class Authority
         }
         receipts[key] = value;
         return value;
+    }
+
+    // Decides what the host applies for one incoming change, given the object as the host holds it now (null if absent). An edit
+    // built on the host's current state is applied as sent. Otherwise somebody else changed the object in the meantime, and the
+    // rule is: the later edit (the one processed second) wins, per property, and a clash is reported in `notices` rather than
+    // refused. Only the unambiguous cases are resolved; anything else keeps the conflict refusal.
+    private static Change Reconcile(Change change, ObjectState current, List<string> notices)
+    {
+        if (StateRules.Equal(current, change.Before))
+        {
+            return change;
+        }
+        // A creation of an id that already exists is two objects claiming one identity, not an edit to merge.
+        if ((object)change.Before == null)
+        {
+            throw Conflict(change);
+        }
+        Change applied;
+        if ((object)change.After == null)
+        {
+            // Deleting an object that someone edited meanwhile: the deletion wins. Deleting one that is already gone has
+            // nothing to apply, so it stays a conflict.
+            if ((object)current == null)
+            {
+                throw Conflict(change);
+            }
+            applied = new Change(change.Id, current, null);
+            notices.Add("The later deletion of \"" + DisplayName(current) + "\" was kept; a concurrent edit to the same object was discarded.");
+        }
+        else if ((object)current == null)
+        {
+            // Editing an object that was deleted meanwhile: the later edit wins and the object comes back as the editor left it.
+            applied = new Change(change.Id, null, change.After);
+            notices.Add("A concurrent deletion of \"" + DisplayName(change.After) + "\" was overridden; the later edit was kept and the object was restored.");
+        }
+        else
+        {
+            if (!PropertyMerge.TryMerge(current, change.Before, change.After, out ObjectState merged, out List<string> clashed))
+            {
+                throw Conflict(change);
+            }
+            applied = new Change(change.Id, current, merged);
+            if (clashed.Count > 0)
+            {
+                notices.Add("Concurrent edits to \"" + DisplayName(current) + "\" were combined; the later edit was kept for: " + string.Join(", ", clashed) + ".");
+            }
+        }
+        // The applied change is what every peer will see, so it passes the same rules as an edit sent in one piece.
+        StateRules.ValidateChange(applied);
+        return applied;
+    }
+
+    private static InvalidOperationException Conflict(Change change)
+    {
+        return new InvalidOperationException("Conflict on " + change.Id + ": first accepted edit wins. Your edit is retained in recovery.");
+    }
+
+    // The name a person recognises the object by; the id when it has no readable name.
+    private static string DisplayName(ObjectState state)
+    {
+        return (state.Data?["Name"] is JsonValue jsonValue && jsonValue.TryGetValue(out string value) && !string.IsNullOrEmpty(value)) ? value : state.Id;
     }
 }
