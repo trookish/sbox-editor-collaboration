@@ -2022,8 +2022,8 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
             }
             if (DateTime.UtcNow >= nextPresence)
             {
-                // Polled every 100 ms as before, but only SENT when something changed or a refresh is due (SendCadence). Every packet an editor
-                // sends is one the relay receives and a shared free relay is billed per message; an idle session used to send fifty a second.
+                // Polled every SendCadence.PresenceMinimum (33 ms), but only SENT when something changed or a refresh is due (SendCadence): the
+                // fast floor exists so remote markers can be drawn from interpolated samples, and an idle session still sends almost nothing.
                 nextPresence = DateTime.UtcNow.AddMilliseconds(SendCadence.PresenceMinimum.TotalMilliseconds);
                 SendPresence(force: false);
                 if (SendCadence.ShouldSendPing(DateTime.UtcNow - lastPingSent))
@@ -2438,11 +2438,13 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
             if (p.Peer != Peer)
             {
                 Roster[p.Peer] = p;
+                FeedPeerSmoothing(p);
             }
         }
         else if (p.Kind == "left")
         {
             Roster.Remove(p.Peer);
+            peerSmoothing.Remove(p.Peer);
         }
         else
         {
@@ -3068,6 +3070,45 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
         }
     }
 
+    // Presence smoothing: one PeerSmoothing per remote peer, fed from every received presence and read by DrawGizmos. presenceClock is the
+    // monotonic clock this session stamps its own presence with (SentMs) and also reads as "local now" for arrival times; the two uses never
+    // meet, because a receiver only compares one sender's stamps with its own arrival times.
+    private readonly SessionClock presenceClock = new SessionClock();
+
+    private readonly Dictionary<string, PeerSmoothing> peerSmoothing = new Dictionary<string, PeerSmoothing>();
+
+    /// <summary>
+    /// Feeds a received presence to its peer's smoother. A presence without a usable SentMs (a peer that predates the field) or without a camera
+    /// is not fed, and that peer keeps being drawn from its raw packets.
+    /// </summary>
+    private void FeedPeerSmoothing(Packet p)
+    {
+        PrunePeerSmoothing();
+        if (!PeerSmoothing.CanSmooth(p.SentMs) || !TryReadPresenceCamera(p.Presence, out var position, out var rotation, out var _))
+        {
+            return;
+        }
+        if (!peerSmoothing.TryGetValue(p.Peer, out var smoothing))
+        {
+            smoothing = new PeerSmoothing();
+            peerSmoothing[p.Peer] = smoothing;
+        }
+        smoothing.OnPresence(p.SentMs, presenceClock.NowMs, PresenceMarker.PoseOf(position, rotation));
+    }
+
+    /// <summary>Forgets smoothers of peers that are no longer in the roster (the roster is cleared on leave and reconnect).</summary>
+    private void PrunePeerSmoothing()
+    {
+        if (peerSmoothing.Count <= Roster.Count)
+        {
+            return;
+        }
+        foreach (string gone in peerSmoothing.Keys.Where((string key) => !Roster.ContainsKey(key)).ToList())
+        {
+            peerSmoothing.Remove(gone);
+        }
+    }
+
     private void SendPresence(bool force = true)
     {
         if (wire == null)
@@ -3148,7 +3189,8 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
             Kind = "presence",
             Scene = presenceScene,
             Peer = Peer,
-            Presence = jsonObject
+            Presence = jsonObject,
+            SentMs = presenceClock.NowMs
         });
     }
 
@@ -3276,6 +3318,12 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                 bool flag2 = (utcNow < focusedUntil && string.Equals(focusedPeer, item.Key, StringComparison.Ordinal)) || Gizmo.IsHovered;
                 if (TryReadPresenceCamera(value.Presence, out var position, out var rotation, out var fieldOfView))
                 {
+                    // The smoothed pose replaces the raw packet once that peer's smoother is ready; until then (and for a peer that sends no SentMs)
+                    // the raw value above is drawn, so a marker may pop in once at warm-up but never stutters.
+                    if (peerSmoothing.TryGetValue(item.Key, out var smoothing))
+                    {
+                        PresenceMarker.ApplySmoothing(smoothing, presenceClock.NowMs, ref position, ref rotation);
+                    }
                     float length = (position - vector).Length;
                     bool flag3 = length <= PresenceStyle.FarDistance;
                     string presenceState = PresenceText(value.Presence, "state", 32) ?? "idle";

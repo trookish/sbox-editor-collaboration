@@ -6466,7 +6466,7 @@ Assert( RelayProtocol.IsTerminal( RelayProtocol.LoopbackCode ) && !RelayProtocol
 Assert( SendCadence.MaxSilence < TimeSpan.FromSeconds( 15 ) && SendCadence.MaxSilence <= TimeSpan.FromSeconds( 5 ), "the longest an editor stays silent is well inside the host's 15 second timeout, with room for a slow network" );
 var t0 = new DateTime( 2026, 9, 30, 12, 0, 0, DateTimeKind.Utc );
 Assert( SendCadence.ShouldSendPresence( changed: true, sinceLastSend: TimeSpan.FromMilliseconds( 100 ), isEditing: false ), "changed presence is sent at the normal rate" );
-Assert( !SendCadence.ShouldSendPresence( changed: true, sinceLastSend: TimeSpan.FromMilliseconds( 40 ), isEditing: false ), "changed presence is not sent more often than the minimum interval" );
+Assert( !SendCadence.ShouldSendPresence( changed: true, sinceLastSend: TimeSpan.FromMilliseconds( 20 ), isEditing: false ), "changed presence is not sent more often than the minimum interval" );
 Assert( !SendCadence.ShouldSendPresence( changed: false, sinceLastSend: TimeSpan.FromMilliseconds( 900 ), isEditing: false ), "unchanged presence is not resent" );
 Assert( SendCadence.ShouldSendPresence( changed: false, sinceLastSend: SendCadence.PresenceRefresh, isEditing: false ), "unchanged presence is still refreshed now and then, so a collaborator who joins later sees where everyone is" );
 Assert( SendCadence.ShouldSendPresence( changed: false, sinceLastSend: SendCadence.PresenceRefresh + TimeSpan.FromSeconds( 1 ), isEditing: false ), "the refresh is a floor, not a one-off" );
@@ -6474,7 +6474,7 @@ Assert( SendCadence.PresenceRefresh <= SendCadence.MaxSilence, "the refresh alon
 Assert( SendCadence.ShouldSendPing( sinceLastSend: SendCadence.PingInterval ) && !SendCadence.ShouldSendPing( sinceLastSend: SendCadence.PingInterval - TimeSpan.FromMilliseconds( 1 ) ), "a heartbeat is sent when the interval has passed, and not before" );
 Assert( SendCadence.PingInterval <= SendCadence.MaxSilence, "the heartbeat alone keeps the connection alive" );
 Assert( SendCadence.MessagesPerSecondIdle( peers: 2 ) <= 2.0, "an idle two-person session sends the relay two messages a second or fewer, not fifty" );
-Assert( Math.Abs( SendCadence.MessagesPerSecondMoving( peers: 2 ) - 21.0 ) < 1e-9, "two people both moving their cameras send at most twenty-one a second: ten presence packets and half a heartbeat each" );
+Assert( Math.Abs( SendCadence.MessagesPerSecondMoving( peers: 2 ) - 2 * ( 1000.0 / 33.0 + 0.5 ) ) < 1e-9, "two people both moving their cameras send at most about sixty-two a second: a presence packet every 33 ms and half a heartbeat each (was twenty-one at 100 ms)" );
 Assert( SendCadence.BilledRequestsPerHour( messagesPerSecond: 50 ) == 9000 && SendCadence.BilledRequestsPerHour( messagesPerSecond: 2 ) == 360, "billing at 20 messages to 1 request, as the relay's pricing states" );
 Assert( SendCadence.FreeHoursPerDay( messagesPerSecond: 2 ) > 250, "at the idle rate the free allowance covers hundreds of session-hours a day across all users" );
 
