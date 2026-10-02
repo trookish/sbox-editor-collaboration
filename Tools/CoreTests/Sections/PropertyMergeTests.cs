@@ -132,7 +132,9 @@ static class PropertyMergeTests
     static void ValidationFloatNoise( Action<bool, string> assert )
     {
         var before = Edited( Cube( "Cube", "0,0,0", "", Renderer() ), d => { d["Mass"] = 0.6; d["Components"]!.AsArray()[0]!["Opacity"] = 0.6; } );
-        var echoed = Edited( With( before, "Position", "4,0,0" ), d => { d["Mass"] = JsonNode.Parse( "0.600000024" ); d["Components"]!.AsArray()[0]!["Opacity"] = JsonNode.Parse( "0.600000024" ); } );
+        // The component is also really edited (Tint is supported): that is the only way the per-field component check runs at all,
+        // because components that are equal under the tolerant comparison are skipped as a whole.
+        var echoed = Edited( With( before, "Position", "4,0,0" ), d => { d["Mass"] = JsonNode.Parse( "0.600000024" ); d["Components"]!.AsArray()[0]!["Tint"] = "0,1,0,1"; d["Components"]!.AsArray()[0]!["Opacity"] = JsonNode.Parse( "0.600000024" ); } );
         string Refusal( ObjectState from, ObjectState to )
         {
             try { StateRules.ValidateChange( new Change( from.Id, from, to ) ); return null; }
@@ -141,7 +143,7 @@ static class PropertyMergeTests
         assert( Refusal( before, echoed ) == null, "merge_validate_float_echo_of_unsupported_properties_is_not_a_change: " + Refusal( before, echoed ) );
         var realTop = Edited( before, d => d["Mass"] = 0.61 );
         assert( Refusal( before, realTop ) == "Unsupported GameObject property: Mass", "merge_validate_real_change_of_an_unsupported_property_is_still_refused: " + Refusal( before, realTop ) );
-        var realComponent = Edited( before, d => d["Components"]!.AsArray()[0]!["Opacity"] = 0.61 );
+        var realComponent = Edited( before, d => { d["Components"]!.AsArray()[0]!["Tint"] = "0,1,0,1"; d["Components"]!.AsArray()[0]!["Opacity"] = 0.61; } );
         assert( Refusal( before, realComponent ) == "Unsupported inspector property: Sandbox.ModelRenderer.Opacity", "merge_validate_real_change_of_an_unsupported_component_field_is_still_refused: " + Refusal( before, realComponent ) );
     }
 
@@ -555,6 +557,22 @@ static class PropertyMergeTests
             second.Apply( Edit( "peer-a", new Change( gone.Id, gone, null ) ) );
             var again = second.Apply( Edit( "peer-b", new Change( gone.Id, gone, null ) ) );
             assert( again.Kind == "reject" && again.Error.StartsWith( "Conflict on " + gone.Id, StringComparison.Ordinal ), "merge_deleting_an_already_deleted_object_stays_a_conflict: " + again.Kind + " " + again.Error );
+        }
+
+        // The restore route must pass the creation rules: a sender cannot bring an object back (or into being) around them by
+        // claiming a stale Before that already carries a component type the host does not allow to be created.
+        {
+            var original = Cube( "Cube", "0,0,0", "", Renderer() );
+            var authority = Seeded( out var journal, original );
+            authority.Apply( Edit( "peer-a", new Change( original.Id, original, null ) ) );
+            var revision = authority.Revision;
+            var count = journal.Count;
+            var foreign = new JsonObject { ["__guid"] = Guid.NewGuid().ToString(), ["__type"] = "Sandbox.NotAllowedToBeCreated" };
+            var claimedBefore = Edited( original, d => d["Components"]!.AsArray().Add( foreign.DeepClone() ) );
+            var claimedAfter = With( claimedBefore, "Name", "Smuggled" );
+            var smuggle = authority.Apply( Edit( "peer-b", new Change( original.Id, claimedBefore, claimedAfter ) ) );
+            assert( smuggle.Kind == "reject" && smuggle.Error.Contains( "Creation/deletion of Sandbox.NotAllowedToBeCreated is not supported", StringComparison.Ordinal ), "merge_restore_applies_the_creation_rules_to_what_it_brings_back: " + smuggle.Kind + " " + smuggle.Error );
+            assert( authority.Revision == revision && journal.Count == count && !authority.Scenes[Scene].ContainsKey( original.Id ), "merge_refused_restore_changes_nothing" );
         }
 
         // Creation of an id that already exists keeps the conflict error, and changes nothing.
