@@ -74,7 +74,29 @@ public sealed class SessionServer : IDisposable
 
     private readonly CancellationTokenSource verificationLifetime = new CancellationTokenSource();
 
+    private readonly DriftDetector drift = new DriftDetector();
+
+    // The host's digest of each scene, valid for one revision: every edit moves the revision, and a scene changes only through an edit,
+    // so a ping every two seconds from each member costs one hash per change instead of one per ping.
+    private readonly Dictionary<string, (long Revision, string Digest)> hostDigests = new Dictionary<string, (long Revision, string Digest)>();
+
+    private readonly System.Diagnostics.Stopwatch driftClock = System.Diagnostics.Stopwatch.StartNew();
+
+    private string driftNoticePeer;
+
     public string Failure { get; private set; }
+
+    /// <summary>
+    /// A formal sentence for the host's user when a guest's editor keeps drifting from the host's scene although it was resynchronised
+    /// repeatedly, or null. It clears when that guest agrees with the host again or leaves.
+    /// </summary>
+    public string DriftNotice { get; private set; }
+
+    /// <summary>Seconds on a monotonic clock for the drift rules; tests replace it to control time.</summary>
+    public Func<double> DriftClock { get; set; }
+
+    /// <summary>How many times the host has hashed a scene for drift checks (cache misses), for tests of the per-revision cache.</summary>
+    public int HostDigestComputations { get; private set; }
 
     public string StoredFailure => (Failure == null) ? null : CollaborationTransportDiagnostics.BoundedStoredDiagnostic(Failure);
 
@@ -254,6 +276,7 @@ public sealed class SessionServer : IDisposable
                         {
                             Kind = "pong"
                         });
+                        CheckDrift(m, p);
                         break;
                     case "leave":
                         Remove(m);
@@ -303,6 +326,66 @@ public sealed class SessionServer : IDisposable
                 }
             }
         }
+    }
+
+    // A ping from a peer that predates the digest, or one that names a scene the host does not hold, is answered with the pong alone. Nothing
+    // here may fail the member's session: drift detection is a courtesy on top of the heartbeat.
+    private void CheckDrift(Member member, Packet ping)
+    {
+        if (string.IsNullOrEmpty(ping.Digest) || !ping.DigestRevision.HasValue || string.IsNullOrEmpty(ping.DigestScene) || !authority.Scenes.ContainsKey(ping.DigestScene))
+        {
+            return;
+        }
+        string hostDigest = HostDigestOf(ping.DigestScene);
+        if (hostDigest == null)
+        {
+            return;
+        }
+        double now = (DriftClock ?? (() => driftClock.Elapsed.TotalSeconds))();
+        DriftVerdict verdict = drift.ShouldResync(member.Peer, ping.DigestScene, ping.DigestRevision.Value, ping.Digest, authority.Revision, hostDigest, now);
+        if (ping.DigestRevision.Value == authority.Revision && string.Equals(ping.Digest, hostDigest, StringComparison.Ordinal) && driftNoticePeer == member.Peer)
+        {
+            ClearDriftNotice();
+        }
+        if (verdict == DriftVerdict.Resync)
+        {
+            // The same packet a subscribe is answered with: the scene already exists, so this only reads the host's state.
+            member.Wire.Send(authority.Subscribe(new Packet
+            {
+                Scene = ping.DigestScene
+            }));
+        }
+        else if (verdict == DriftVerdict.Persistent)
+        {
+            driftNoticePeer = member.Peer;
+            DriftNotice = "The editor of " + member.Name + " keeps drifting from the host's copy of \"" + ping.DigestScene + "\" although it was resynchronised " + DriftDetector.PersistentResyncCount + " times. Ask them to leave and rejoin the session.";
+        }
+    }
+
+    private string HostDigestOf(string scene)
+    {
+        if (hostDigests.TryGetValue(scene, out var cached) && cached.Revision == authority.Revision)
+        {
+            return cached.Digest;
+        }
+        try
+        {
+            HostDigestComputations++;
+            string digest = SceneDigest.Compute(authority.Scenes[scene]);
+            hostDigests[scene] = (authority.Revision, digest);
+            return digest;
+        }
+        catch (ArgumentException)
+        {
+            // The digest refuses a scene it cannot fingerprint faithfully. That says nothing about the guest, so no comparison is made.
+            return null;
+        }
+    }
+
+    private void ClearDriftNotice()
+    {
+        DriftNotice = null;
+        driftNoticePeer = null;
     }
 
     private void Reject(Member member, string reason)
@@ -523,6 +606,11 @@ public sealed class SessionServer : IDisposable
             member.Wire.Dispose();
             if (member.Peer != null)
             {
+                drift.Forget(member.Peer);
+                if (driftNoticePeer == member.Peer)
+                {
+                    ClearDriftNotice();
+                }
                 Broadcast(new Packet
                 {
                     Kind = "left",
