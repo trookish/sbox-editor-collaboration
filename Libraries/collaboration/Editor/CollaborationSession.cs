@@ -199,6 +199,12 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
 
     private DateTime lastPingSent;
 
+    // The newest host revision this editor has seen, from every accepted and snapshot packet. A ping reports it next to the scene digest so
+    // the host compares digests only when this editor is up to date (see DriftDetector).
+    private long lastRevision;
+
+    private string driftNoticeShown;
+
     private string lastPresenceFingerprint;
 
     private DateTime lastReceive;
@@ -616,6 +622,12 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
 
     public string ActionNotice { get; private set; }
 
+    /// <summary>
+    /// On the host: a formal sentence when a guest's editor keeps drifting from the host's scene although it was resynchronised repeatedly,
+    /// otherwise null. Always null on a guest.
+    /// </summary>
+    public string DriftNotice => server?.DriftNotice;
+
     public string TerminalTeardownError => lifecycle.TerminalDiagnostic;
 
     public bool ReconnectRecovery => reconnectRecovery;
@@ -931,6 +943,8 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
         scenes.Clear();
         Roster.Clear();
         seen.Clear();
+        lastRevision = 0;
+        driftNoticeShown = null;
         Error = null;
         RecoveryNotice = null;
         // A path from an earlier session would otherwise sit under a new failure and point at an archive that has
@@ -2029,10 +2043,13 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                 if (SendCadence.ShouldSendPing(DateTime.UtcNow - lastPingSent))
                 {
                     lastPingSent = DateTime.UtcNow;
-                    wire.Send(new Packet
+                    Packet ping = new Packet
                     {
                         Kind = "ping"
-                    });
+                    };
+                    AttachSceneDigest(ping);
+                    wire.Send(ping);
+                    ShowDriftNoticeOnce();
                 }
             }
             if (Error != null || DateTime.UtcNow < nextScan)
@@ -2164,6 +2181,15 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
             }
         }
         lastReceive = DateTime.UtcNow;
+        // Recorded here and not in Receive so that every packet that carries a revision is counted, whichever branch handles it.
+        if (result.Kind == "snapshot")
+        {
+            lastRevision = result.Revision;
+        }
+        else if (result.Kind == "accepted" && result.Revision > lastRevision)
+        {
+            lastRevision = result.Revision;
+        }
         Receive(result);
     }
 
@@ -2370,6 +2396,92 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
         }
     }
 
+    // Adds the scene digest to a ping for the active scene, when there is something trustworthy to report. The digest is of Known, the state the
+    // host last confirmed, and not of the live scene: a drag that has not been sent yet is an edit in progress, never drift. Nothing is reported
+    // while an edit awaits acknowledgement, while the scene is still joining, or during play, when the scene on screen is a copy.
+    private void AttachSceneDigest(Packet ping)
+    {
+        try
+        {
+            SceneEditorSession active = SceneEditorSession.Active;
+            string path = SceneAdapter.PathOf(active);
+            if (path == null || !scenes.TryGetValue(path, out var tracked) || tracked.Session != active)
+            {
+                return;
+            }
+            if (!tracked.Ready || tracked.Pending != null || IsLocalPlaying(active))
+            {
+                return;
+            }
+            string digest = SceneDigest.Compute(tracked.Known);
+            ping.Digest = digest;
+            ping.DigestRevision = lastRevision;
+            ping.DigestScene = path;
+        }
+        catch (Exception)
+        {
+            // The digest is a courtesy on top of the heartbeat. A scene it cannot fingerprint just goes unreported; the ping itself must still go out.
+            ping.Digest = null;
+            ping.DigestRevision = null;
+            ping.DigestScene = null;
+        }
+    }
+
+    // Tells the host's user once when a guest keeps drifting despite resyncs; nothing is shown again until the notice changes or clears.
+    private void ShowDriftNoticeOnce()
+    {
+        string notice = server?.DriftNotice;
+        if (notice == null)
+        {
+            driftNoticeShown = null;
+            return;
+        }
+        if (!string.Equals(notice, driftNoticeShown, StringComparison.Ordinal))
+        {
+            driftNoticeShown = notice;
+            SetActionNotice(notice);
+            ShowToast("A collaborator's scene keeps drifting", notice, Theme.Red, 15f);
+        }
+    }
+
+    // Writes the live text of a scene to .collaboration/recovery before the host's snapshot replaces it, and returns the file's path. The folder,
+    // the engine's own scene serialisation and the write wrapper are the ones Preserve uses; the name is RecoveryBackup's. A copy is never
+    // overwritten (two snapshots in one second get a counter), and a failed write throws the specific message so that the caller applies nothing.
+    private string WriteSceneBackup(string scene, Tracked tracked)
+    {
+        string path = null;
+        try
+        {
+            string text = tracked.Session.Scene.Serialize().ToJsonString(new JsonSerializerOptions
+            {
+                WriteIndented = true
+            });
+            string folder = Path.Combine(SceneAdapter.Root, ".collaboration", "recovery");
+            Directory.CreateDirectory(folder);
+            string name = RecoveryBackup.BuildFileName(scene, DateTime.UtcNow);
+            path = Path.Combine(folder, name);
+            for (int counter = 2; File.Exists(path) && counter < 100; counter++)
+            {
+                path = Path.Combine(folder, name.Substring(0, name.Length - ".scene".Length) + "-" + counter + ".scene");
+            }
+            string target = path;
+            RecoveryPathOutcome outcome = RecoveryPathRules.PublishAfterWrite(target, () =>
+            {
+                using FileStream stream = new FileStream(target, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+                stream.Write(Encoding.UTF8.GetBytes(text));
+                stream.Flush(flushToDisk: true);
+            });
+            if (outcome.Succeeded)
+            {
+                return outcome.Published;
+            }
+        }
+        catch (Exception)
+        {
+        }
+        throw new InvalidOperationException(RecoveryBackup.BackupFailedMessage);
+    }
+
     private void Receive(Packet p)
     {
         if (p.Kind == "welcome")
@@ -2470,9 +2582,22 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                     tracked2.Known = dictionary;
                     return;
                 }
-                if (!restoring && StateRules.Diff(tracked2.Known, SceneAdapter.Capture(tracked2.Session.Scene)).Count > 0)
+                string restoredNotice = null;
+                if (!restoring)
                 {
-                    throw new InvalidOperationException("Scene edited during join; local state retained");
+                    if (tracked2.Ready && tracked2.Pending != null)
+                    {
+                        // A resync that arrives while an edit awaits the host's answer would replace the scene under that edit, and the answer
+                        // would then be applied to a scene it was not made against. Nothing is lost by waiting: the digest is not sent while
+                        // an edit is pending, and the next ping after the answer finds the drift again if it is still there.
+                        return;
+                    }
+                    if (StateRules.Diff(tracked2.Known, SceneAdapter.Capture(tracked2.Session.Scene)).Count > 0)
+                    {
+                        // Unsent edits are about to be replaced by the host's scene: they are written to a file first, and if that fails
+                        // the host's scene is not applied, because unsaved work is never replaced without a copy.
+                        restoredNotice = RecoveryBackup.BuildNotice(p.Scene, WriteSceneBackup(p.Scene, tracked2));
+                    }
                 }
                 SceneAdapter.Apply(tracked2.Session, dictionary);
                 tracked2.Known = dictionary;
@@ -2485,6 +2610,11 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                 if (scenes.Values.All((Tracked x) => x.Ready || !x.Session.Scene.IsValid()))
                 {
                     restoring = false;
+                }
+                if (restoredNotice != null)
+                {
+                    SetActionNotice(restoredNotice);
+                    ShowToast("Scene restored from the host", restoredNotice, Theme.Primary, 15f);
                 }
             }
             else
