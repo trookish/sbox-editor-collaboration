@@ -589,6 +589,18 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
 
     public string SaveNotice { get; private set; }
 
+    /// <summary>
+    /// A formal sentence about somebody else's edit meeting this editor's own (the host combined them, a clash was settled in favour of
+    /// one side, or an unsent change could not be kept). Null when there is nothing to say; cleared by <see cref="Frame"/> about eight
+    /// seconds after <see cref="MergeNoticeAt"/>. The Controls card shows it.
+    /// </summary>
+    public string MergeNotice { get; private set; }
+
+    /// <summary>When <see cref="MergeNotice"/> was last set (UTC); meaningful only while the notice is non-null.</summary>
+    public DateTime MergeNoticeAt { get; private set; }
+
+    private DateTime mergeNoticeExpires;
+
     public bool AutoSaveIdle { get; set; }
 
     public bool AutoRecover
@@ -731,6 +743,18 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
             SaveNotice = text2;
             saveNoticeExpires = DateTime.UtcNow.AddSeconds(8.0);
         }
+    }
+
+    private void SetMergeNotice(string text)
+    {
+        // `text` is already joined, cleaned and bounded by ChangeRebase.JoinNotices; a repeated sentence only extends the display time.
+        if (string.IsNullOrEmpty(text))
+        {
+            return;
+        }
+        MergeNotice = text;
+        MergeNoticeAt = DateTime.UtcNow;
+        mergeNoticeExpires = MergeNoticeAt.AddSeconds(8.0);
     }
 
     [EditorEvent.Hotload]
@@ -949,6 +973,8 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
         undoNoticeExpires = default;
         ActionNotice = null;
         actionNoticeExpires = default;
+        MergeNotice = null;
+        mergeNoticeExpires = default;
         lastAutoSave = default;
         lastLocalEdit = default;
         nextAutoSaveCheck = default;
@@ -1862,6 +1888,11 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
             ActionNotice = null;
             actionNoticeExpires = default;
         }
+        if (mergeNoticeExpires != default(DateTime) && DateTime.UtcNow >= mergeNoticeExpires)
+        {
+            MergeNotice = null;
+            mergeNoticeExpires = default;
+        }
         try
         {
             try
@@ -2499,10 +2530,43 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                     return;
                 }
                 AcceptedOperations++;
+                // Sentences for the user gathered while this packet is processed: the host's own notice first, then ours.
+                List<string> rebaseNotices = new List<string> { p.Notice };
                 if (p.Peer == Peer)
                 {
+                    // What this editor sent for the packet being answered, when it is still the pending one. A receipt that outlived it
+                    // (an outbox replay after a reconnect) has no sent edit to compare with.
+                    Packet sentPacket = (tracked2.Pending != null && tracked2.Pending.Id == p.Id) ? tracked2.Pending : null;
+                    bool liveScene = tracked2.Session.Scene.IsValid() && SceneEditorSession.All.Contains(tracked2.Session);
+                    Dictionary<string, ObjectState> rebased = null;
+                    bool rebaseChangesScene = false;
                     foreach (Change change in p.Changes)
                     {
+                        if (liveScene)
+                        {
+                            ObjectState sentAfter = sentPacket?.Changes?.FirstOrDefault((Change x) => x.Id == change.Id)?.After;
+                            if (ChangeRebase.NeedsOwnReceiptRebase(p.Merged, sentPacket != null, sentAfter, change.After))
+                            {
+                                // The host kept something other than what was sent. Take its result into the live scene before Known
+                                // moves on, otherwise the next scan sees scene != Known and sends the old local state back over it.
+                                rebased ??= SceneAdapter.Capture(tracked2.Session.Scene);
+                                ObjectState local = rebased.GetValueOrDefault(change.Id);
+                                RebaseResult result = ChangeRebase.RebaseOntoOwnReceipt(change.Id, sentAfter, local, change.After);
+                                rebaseNotices.Add(result.Notice);
+                                if (!StateRules.Equal(result.NewLocal, local))
+                                {
+                                    rebaseChangesScene = true;
+                                }
+                                if ((object)result.NewLocal == null)
+                                {
+                                    rebased.Remove(change.Id);
+                                }
+                                else
+                                {
+                                    rebased[change.Id] = result.NewLocal;
+                                }
+                            }
+                        }
                         if ((object)change.After == null)
                         {
                             tracked2.Known.Remove(change.Id);
@@ -2513,6 +2577,13 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                         }
                         ObjectState before = (tracked2.Group.TryGetValue(change.Id, out var value) ? value.Before : change.Before);
                         tracked2.Group[change.Id] = new Change(change.Id, before, change.After);
+                    }
+                    if (rebaseChangesScene)
+                    {
+                        SceneAdapter.Apply(tracked2.Session, rebased);
+                        tracked2.LastOrder = SceneAdapter.Capture(tracked2.Session.Scene);
+                        tracked2.Session.UndoSystem.Initialize();
+                        MirrorNativeUndo(tracked2);
                     }
                     ForgetPending(tracked2, p.Id);
                     if (p.Final)
@@ -2536,18 +2607,24 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                     Dictionary<string, ObjectState> dictionary2 = (flag ? SceneAdapter.Capture(tracked2.Session.Scene) : new Dictionary<string, ObjectState>(tracked2.Known));
                     foreach (Change change2 in p.Changes)
                     {
-                        if (!StateRules.Equal(dictionary2.GetValueOrDefault(change2.Id), tracked2.Known.GetValueOrDefault(change2.Id)))
+                        // The user may hold an edit the host has not seen (mid-drag, or not yet sent). It is kept on top of the host's
+                        // change instead of failing the session; ChangeRebase never throws on divergence because the host is the authority.
+                        RebaseResult rebase = ChangeRebase.RebaseOntoRemoteChange(change2.Id, tracked2.Known.GetValueOrDefault(change2.Id), dictionary2.GetValueOrDefault(change2.Id), change2.Before, change2.After);
+                        rebaseNotices.Add(rebase.Notice);
+                        if ((object)rebase.NewLocal == null)
                         {
-                            throw new InvalidOperationException("Concurrent edit on " + change2.Id + ". Your local version was preserved. Use Recover & reconnect to accept the host state.");
+                            dictionary2.Remove(change2.Id);
+                        }
+                        else
+                        {
+                            dictionary2[change2.Id] = rebase.NewLocal;
                         }
                         if ((object)change2.After == null)
                         {
-                            dictionary2.Remove(change2.Id);
                             tracked2.Known.Remove(change2.Id);
                         }
                         else
                         {
-                            dictionary2[change2.Id] = change2.After;
                             tracked2.Known[change2.Id] = change2.After;
                         }
                     }
@@ -2559,6 +2636,7 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                         MirrorNativeUndo(tracked2);
                     }
                 }
+                SetMergeNotice(ChangeRebase.JoinNotices(rebaseNotices.ToArray()));
                 Status = "Connected • revision " + p.Revision;
             }
         }
