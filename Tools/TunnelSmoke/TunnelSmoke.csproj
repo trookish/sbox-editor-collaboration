@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>14</LangVersion>
+    <Nullable>disable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- The same rules and pin the editor uses, linked rather than copied: the smoke test proves THEIR behaviour against the real tool. -->
+    <Compile Include="../../Libraries/collaboration/Editor/Core/*.cs" Link="Core/%(Filename)%(Extension)" />
+    <Compile Include="../../Libraries/collaboration/Editor/CloudflaredPin.cs" Link="CloudflaredPin.cs" />
+  </ItemGroup>
+</Project>
