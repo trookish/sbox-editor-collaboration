@@ -263,6 +263,20 @@ public sealed class SessionServer : IDisposable
                         }
                         break;
                     }
+                    case SettingsMerge.PacketKind:
+                    {
+                        // Routed exactly like an edit: the merged settings go to every member, a refusal only to the sender.
+                        Packet packet = authority.ApplySettings(p);
+                        if (packet.Kind == "reject")
+                        {
+                            m.Wire.Send(packet);
+                        }
+                        else
+                        {
+                            Broadcast(packet);
+                        }
+                        break;
+                    }
                     case "presence":
                         p.Name = m.Name;
                         // The account the host admitted, never whatever the sender wrote: this is what every editor looks the profile
@@ -371,7 +385,9 @@ public sealed class SessionServer : IDisposable
         try
         {
             HostDigestComputations++;
-            string digest = SceneDigest.Compute(authority.Scenes[scene]);
+            // Settings are part of the scene's state, so they are part of its fingerprint: a guest that agrees on every object but holds
+            // other settings has drifted too. Each settings change moves the revision, so the per-revision cache stays valid.
+            string digest = SceneDigest.Compute(authority.Scenes[scene], authority.SceneSettings.GetValueOrDefault(scene));
             hostDigests[scene] = (authority.Revision, digest);
             return digest;
         }

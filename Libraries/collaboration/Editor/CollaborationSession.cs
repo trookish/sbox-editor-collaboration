@@ -47,7 +47,17 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
 
         public bool UndoPending;
 
+        // The scene's own settings as the host last confirmed them (SettingsMerge). Null when the host holds none for the scene.
         public JsonObject Settings;
+
+        // The one settings change awaiting the host's answer, like Pending for edits.
+        public Packet SettingsPending;
+
+        // What this editor last wrote into the scene's settings and what the engine reported right after: the difference is what the engine
+        // could not take, which SettingsMerge.LocalChange must never mistake for the user's change. Null until the first write.
+        public JsonObject SettingsApplied;
+
+        public JsonObject SettingsEcho;
 
         public Dictionary<string, ObjectState> LastOrder;
 
@@ -278,6 +288,9 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
     private int startPort;
 
     private readonly HashSet<string> seen = new HashSet<string>();
+
+    // Ids of every settings change this editor sent: a reject for one of them is the host refusing that change, never a reason to fail.
+    private readonly HashSet<string> sentSettings = new HashSet<string>();
 
     private const float PromptToastSeconds = 15f;
 
@@ -967,6 +980,7 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
         scenes.Clear();
         Roster.Clear();
         seen.Clear();
+        sentSettings.Clear();
         lastRevision = 0;
         driftNoticeShown = null;
         Error = null;
@@ -1543,7 +1557,9 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
             if (value.Session.Scene.IsValid())
             {
                 value.Session.Reload();
-                value.Settings = value.Session.Scene.SerializeProperties();
+                value.Settings = SceneSettingsAdapter.Capture(value.Session.Scene);
+                value.SettingsApplied = null;
+                value.SettingsEcho = null;
                 value.DiskStamp = SceneAdapter.DiskStamp(SceneAdapter.PathOf(value.Session));
             }
         }
@@ -1567,7 +1583,7 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
             Checkpoint();
         }
         bool archiveFailed = RuntimeLifecycle.State == PlayModeLifecycleState.RuntimeBlocked && ArchiveHotloadLifecycle(RuntimeLifecycle.ArchiveReason ?? "hotloaded") == HotloadArchiveOutcome.Failed;
-        SessionLeaveOutcome sessionLeaveOutcome = SessionLeaveRules.Run(new SessionLeaveRequest(lifecycle, RuntimeLifecycle.IsTransitionInProgress, () => !archiveFailed && scenes.Values.Any((Tracked x) => x.Pending != null || (x.Ready && x.Session.Scene.IsValid() && StateRules.Diff(x.Known, SceneAdapter.Capture(x.Session.Scene)).Count > 0)), (string reason) =>
+        SessionLeaveOutcome sessionLeaveOutcome = SessionLeaveRules.Run(new SessionLeaveRequest(lifecycle, RuntimeLifecycle.IsTransitionInProgress, () => !archiveFailed && scenes.Values.Any((Tracked x) => x.Pending != null || x.SettingsPending != null || (x.Ready && x.Session.Scene.IsValid() && StateRules.Diff(x.Known, SceneAdapter.Capture(x.Session.Scene)).Count > 0)), (string reason) =>
         {
             Preserve(reason);
             return true;
@@ -1658,7 +1674,7 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
         }
         string recoveryWriteFailure = null;
         bool everConnected = hostSession != null;
-        if (CollaborationFailureRules.ShouldArchive(everConnected, scenes.Values.Any((Tracked x) => x.Pending != null)))
+        if (CollaborationFailureRules.ShouldArchive(everConnected, scenes.Values.Any((Tracked x) => x.Pending != null || x.SettingsPending != null)))
         {
             try
             {
@@ -1858,6 +1874,7 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
         {
             Live = x.Value.Session.Scene.Serialize(),
             Pending = x.Value.Pending,
+            SettingsPending = x.Value.SettingsPending,
             Known = x.Value.Known
         });
         Packet[] pending = (from x in scenes.Values
@@ -2120,16 +2137,18 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                     {
                         Session = sceneEditorSession3,
                         Known = SceneAdapter.Capture(sceneEditorSession3.Scene),
-                        Settings = sceneEditorSession3.Scene.SerializeProperties(),
+                        Settings = SceneSettingsAdapter.Capture(sceneEditorSession3.Scene),
                         DiskStamp = SceneAdapter.DiskStamp(text)
                     };
                     scenes[text] = value;
                     value.LastOrder = value.Known;
+                    // The settings seed the host's copy when this editor is the scene's first subscriber; otherwise the snapshot replaces them.
                     wire.Send(new Packet
                     {
                         Kind = "subscribe",
                         Scene = text,
-                        Objects = value.Known.Values.ToList()
+                        Objects = value.Known.Values.ToList(),
+                        Settings = value.Settings
                     });
                 }
                 else
@@ -2160,9 +2179,16 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                         value.StampMismatchSince = default;
                         throw new InvalidOperationException("Scene file changed outside Collaboration Save. Local state retained; leave and reconcile the file in Git.");
                     }
-                    if (!JsonNode.DeepEquals(value.Settings, sceneEditorSession3.Scene.SerializeProperties()))
+                    // Scene settings are host-authoritative state like objects (SettingsMerge): a local change is sent whole, one packet per scene
+                    // at a time, and the host merges it per top-level key. LocalChange compares float-tolerantly and ignores what the engine
+                    // itself refused to take, so neither noise nor residue is ever sent.
+                    if (value.SettingsPending == null)
                     {
-                        throw new InvalidOperationException("Scene settings/metadata/navmesh changes are outside the supported edit set. Local changes retained.");
+                        JsonObject settingsChange = SettingsMerge.LocalChange(value.Settings, value.SettingsApplied, value.SettingsEcho, SceneSettingsAdapter.Capture(sceneEditorSession3.Scene));
+                        if (settingsChange != null)
+                        {
+                            SendSettings(text, value, settingsChange);
+                        }
                     }
                     Dictionary<string, ObjectState> dictionary = SceneAdapter.Capture(sceneEditorSession3.Scene);
                     foreach (string item in value.Known.Keys.Except(dictionary.Keys))
@@ -2217,7 +2243,7 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
         {
             lastRevision = result.Revision;
         }
-        else if (result.Kind == "accepted" && result.Revision > lastRevision)
+        else if ((result.Kind == "accepted" || result.Kind == SettingsMerge.PacketKind) && result.Revision > lastRevision)
         {
             lastRevision = result.Revision;
         }
@@ -2400,6 +2426,116 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
         Status = "Connected • edit awaiting acknowledgement";
     }
 
+    // Sends the scene's settings as they are now, with the confirmed settings they were changed from. A change above the size bound is not
+    // sent at all: the host would refuse it, and the refusal is the same either way.
+    private void SendSettings(string scene, Tracked tracked, JsonObject after)
+    {
+        string sizeError = SettingsMerge.SizeError(after);
+        if (sizeError != null)
+        {
+            RefuseSettings(tracked, sizeError);
+            return;
+        }
+        tracked.SettingsPending = new Packet
+        {
+            Kind = SettingsMerge.PacketKind,
+            Scene = scene,
+            Peer = Peer,
+            SettingsBefore = SettingsMerge.Clone(tracked.Settings),
+            Settings = after
+        };
+        sentSettings.Add(tracked.SettingsPending.Id);
+        wire.Send(tracked.SettingsPending);
+        Status = "Connected • scene settings awaiting acknowledgement";
+    }
+
+    // A refused settings change is not retried: the scene takes back the host's settings, which this editor already holds as the confirmed
+    // settings (the same settings the next snapshot would carry), and the user is told why. Without the revert the scan would find the
+    // same change again and resend it every 50 ms.
+    private void RefuseSettings(Tracked tracked, string reason)
+    {
+        tracked.SettingsPending = null;
+        SetActionNotice(reason);
+        ShowToast("Scene settings change refused", reason, Theme.Primary, 15f);
+        if (tracked.Settings != null)
+        {
+            WriteSettings(tracked, tracked.Settings);
+        }
+    }
+
+    private bool HasUnsentSettings(Tracked tracked)
+    {
+        return tracked.Session.Scene.IsValid() && SettingsMerge.LocalChange(tracked.Settings, tracked.SettingsApplied, tracked.SettingsEcho, SceneSettingsAdapter.Capture(tracked.Session.Scene)) != null;
+    }
+
+    // Writes settings into the live scene when they differ from what it has, and records what was written and what the engine then reported.
+    private void WriteSettings(Tracked tracked, JsonObject settings)
+    {
+        if (!tracked.Session.Scene.IsValid() || !SceneEditorSession.All.Contains(tracked.Session))
+        {
+            return;
+        }
+        if (!StateRules.ValuesEqual(SceneSettingsAdapter.Capture(tracked.Session.Scene), settings))
+        {
+            List<string> skipped = SceneSettingsAdapter.Apply(tracked.Session.Scene, settings);
+            if (skipped.Count > 0)
+            {
+                SetActionNotice("Some scene settings could not be applied in this editor and were left unchanged: " + string.Join("; ", skipped));
+            }
+        }
+        tracked.SettingsApplied = SettingsMerge.Clone(settings);
+        tracked.SettingsEcho = SceneSettingsAdapter.Capture(tracked.Session.Scene);
+    }
+
+    // A settings broadcast from the host: the merged settings become the confirmed settings. A change of this editor's that the host has not
+    // seen yet (made after the last send, or not sent yet) is kept on top of them, key by key, exactly as an unsent object edit is kept on
+    // top of a remote change, and the next scan sends it.
+    private void ReceiveSettings(Tracked tracked, Packet p)
+    {
+        if (!seen.Add(p.Peer + ":" + p.Id))
+        {
+            // A receipt repeated after a resend was applied the first time; applying it again would undo whatever was accepted since.
+            if (tracked.SettingsPending?.Id == p.Id)
+            {
+                tracked.SettingsPending = null;
+            }
+            return;
+        }
+        if (p.Settings == null)
+        {
+            throw new InvalidOperationException("The host sent a scene settings change without settings.");
+        }
+        bool own = p.Peer == Peer;
+        if (own && tracked.SettingsPending?.Id == p.Id)
+        {
+            tracked.SettingsPending = null;
+        }
+        List<string> notices = new List<string> { p.Notice };
+        JsonObject target = p.Settings;
+        if (tracked.Session.Scene.IsValid() && SceneEditorSession.All.Contains(tracked.Session))
+        {
+            JsonObject local = SettingsMerge.LocalChange(tracked.Settings, tracked.SettingsApplied, tracked.SettingsEcho, SceneSettingsAdapter.Capture(tracked.Session.Scene));
+            if (local != null && tracked.Settings != null && SettingsMerge.TryMerge(p.Settings, tracked.Settings, local, out JsonObject kept, out List<string> clashed))
+            {
+                target = kept;
+                if (!own)
+                {
+                    notices.Add(SettingsMerge.LocalKeptNotice(clashed));
+                }
+            }
+        }
+        tracked.Settings = SettingsMerge.Clone(p.Settings);
+        WriteSettings(tracked, target);
+        SetMergeNotice(ChangeRebase.JoinNotices(notices.ToArray()));
+        Status = "Connected • revision " + p.Revision;
+    }
+
+    private Tracked TrackedFor(string scene)
+    {
+        Dictionary<string, object> trackedByScene = scenes.ToDictionary((KeyValuePair<string, Tracked> pair) => pair.Key, (KeyValuePair<string, Tracked> pair) => (object)pair.Value);
+        return (scene != null && ScenePacketRouting.TryResolveTracked(scene, trackedByScene, out string _, out object target)) ? target as Tracked : null;
+    }
+
     private string PendingPath(string id)
     {
         return Path.Combine(SceneAdapter.Root, ".collaboration", "outbox", Peer + "-" + id + ".json");
@@ -2440,11 +2576,12 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
             {
                 return;
             }
-            if (!tracked.Ready || tracked.Pending != null || IsLocalPlaying(active))
+            if (!tracked.Ready || tracked.Pending != null || tracked.SettingsPending != null || IsLocalPlaying(active))
             {
                 return;
             }
-            string digest = SceneDigest.Compute(tracked.Known);
+            // The host's digest covers its settings for the scene too (SessionServer), so this one covers the confirmed settings.
+            string digest = SceneDigest.Compute(tracked.Known, tracked.Settings);
             ping.Digest = digest;
             ping.DigestRevision = lastRevision;
             ping.DigestScene = path;
@@ -2537,13 +2674,19 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                     {
                         wire.Send(scene.Value.Pending);
                     }
+                    if (scene.Value.SettingsPending != null)
+                    {
+                        // The same id: a host that already applied it answers with the receipt it gave the first time.
+                        wire.Send(scene.Value.SettingsPending);
+                    }
                     if (scene.Value.Session.Scene.IsValid())
                     {
                         wire.Send(new Packet
                         {
                             Kind = "subscribe",
                             Scene = scene.Key,
-                            Objects = scene.Value.Known.Values.ToList()
+                            Objects = scene.Value.Known.Values.ToList(),
+                            Settings = scene.Value.Settings
                         });
                     }
                 }
@@ -2554,6 +2697,16 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
         if (p.Kind == "fatal" || p.Kind == "reject")
         {
             string text = CollaborationTransportDiagnostics.BoundedStoredDiagnostic(p.Error);
+            if (p.Kind == "reject" && p.Id != null && sentSettings.Contains(p.Id))
+            {
+                // The host refused a settings change (for instance above the size bound). That is the host deciding, not a broken session.
+                Tracked refusedScene = TrackedFor(p.Scene);
+                if (refusedScene?.SettingsPending != null && refusedScene.SettingsPending.Id == p.Id)
+                {
+                    RefuseSettings(refusedScene, "The host refused your change to the scene settings: " + text);
+                }
+                return;
+            }
             if (p.Kind == "reject" && p.Scene == null)
             {
                 Fail(text);
@@ -2613,12 +2766,13 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                 if (!tracked2.Session.Scene.IsValid())
                 {
                     tracked2.Known = dictionary;
+                    tracked2.Settings = SettingsMerge.Clone(p.Settings);
                     return;
                 }
                 string restoredNotice = null;
                 if (!restoring)
                 {
-                    if (tracked2.Ready && tracked2.Pending != null)
+                    if (tracked2.Ready && (tracked2.Pending != null || tracked2.SettingsPending != null))
                     {
                         // A resync that arrives while an edit awaits the host's answer would replace the scene under that edit, and the answer
                         // would then be applied to a scene it was not made against. Nothing is lost by waiting: the digest is not sent while
@@ -2634,6 +2788,15 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                 }
                 SceneAdapter.Apply(tracked2.Session, dictionary);
                 tracked2.Known = dictionary;
+                // The host's settings replace this editor's, as its objects do. A host holding none (its first subscriber predates settings
+                // sync) leaves the scene's settings alone, and with nothing confirmed no local change is ever sent for the scene.
+                tracked2.Settings = SettingsMerge.Clone(p.Settings);
+                tracked2.SettingsApplied = null;
+                tracked2.SettingsEcho = null;
+                if (p.Settings != null)
+                {
+                    WriteSettings(tracked2, p.Settings);
+                }
                 tracked2.Ready = true;
                 tracked2.LastOrder = SceneAdapter.Capture(tracked2.Session.Scene);
                 tracked2.Session.UndoSystem.Initialize();
@@ -2649,6 +2812,10 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                     SetActionNotice(restoredNotice);
                     ShowToast("Scene restored from the host", restoredNotice, Theme.Primary, 15f);
                 }
+            }
+            else if (p.Kind == SettingsMerge.PacketKind)
+            {
+                ReceiveSettings(tracked2, p);
             }
             else
             {
@@ -2803,7 +2970,7 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
         {
             return false;
         }
-        if (!JsonNode.DeepEquals(value.Settings, value.Session.Scene.SerializeProperties()))
+        if (value.SettingsPending != null || HasUnsentSettings(value))
         {
             return false;
         }
@@ -2838,9 +3005,13 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
         {
             return "a multi-part edit is still being grouped";
         }
-        if (!JsonNode.DeepEquals(value.Settings, value.Session.Scene.SerializeProperties()))
+        if (value.SettingsPending != null)
         {
-            return "the scene's own settings differ from what the host has";
+            return "a change to the scene settings is still waiting for the host to acknowledge it";
+        }
+        if (HasUnsentSettings(value))
+        {
+            return "a change to the scene settings has not been sent to the host yet";
         }
         List<Change> difference = StateRules.Diff(value.Known, SceneAdapter.Capture(value.Session.Scene));
         if (difference.Count > 0)

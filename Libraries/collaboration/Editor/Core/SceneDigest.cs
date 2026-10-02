@@ -50,6 +50,19 @@ public static class SceneDigest
     /// </exception>
     public static string Compute( IReadOnlyDictionary<string, ObjectState> scene )
     {
+        return Compute( scene, null );
+    }
+
+    /// <summary>
+    /// The digest of a scene's objects together with its scene-level settings (<see cref="SettingsMerge"/>), so that a settings-only
+    /// difference is drift too. With null settings this is exactly <see cref="Compute(IReadOnlyDictionary{string, ObjectState})"/>.
+    /// Otherwise the canonical text is <c>{"objects":[...],"settings":{...}}</c>: it starts with a brace where the objects-only text starts
+    /// with a bracket, so no scene without settings can share its text, and the settings are canonicalised by the same rules as object data
+    /// (sorted keys, float-tolerant numbers).
+    /// </summary>
+    /// <exception cref="ArgumentException">As for the objects-only overload, and for settings that cannot be written canonically.</exception>
+    public static string Compute( IReadOnlyDictionary<string, ObjectState> scene, JsonObject settings )
+    {
         if ( scene == null )
         {
             throw new ArgumentException( "A scene digest cannot be computed because the scene is null.", nameof( scene ) );
@@ -78,6 +91,7 @@ public static class SceneDigest
         objects.Sort( ( a, b ) => string.CompareOrdinal( a.Id, b.Id ) );
 
         var text = new StringBuilder( 64 + objects.Count * 256 );
+        if ( settings != null ) text.Append( "{\"objects\":" );
         text.Append( '[' );
         for ( int i = 0; i < objects.Count; i++ )
         {
@@ -93,6 +107,12 @@ public static class SceneDigest
             text.Append( '}' );
         }
         text.Append( ']' );
+        if ( settings != null )
+        {
+            text.Append( ",\"settings\":" );
+            AppendNode( text, settings, 0, "scene settings" );
+            text.Append( '}' );
+        }
 
         var hash = SHA256.HashData( Encoding.UTF8.GetBytes( text.ToString() ) );
         return Convert.ToHexString( hash, 0, Length / 2 ).ToLowerInvariant();
