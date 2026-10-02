@@ -177,7 +177,89 @@ public static class StateRules
 
     public static bool Equal(ObjectState a, ObjectState b)
     {
-        return ((object)a == null) ? ((object)b == null) : ((object)b != null && a.Id == b.Id && a.Parent == b.Parent && JsonNode.DeepEquals(a.Data, b.Data));
+        return ((object)a == null) ? ((object)b == null) : ((object)b != null && a.Id == b.Id && a.Parent == b.Parent && ValuesEqual(a.Data, b.Data));
+    }
+
+    /// <summary>
+    /// Structural equality of two scene values, tolerant of the engine's 32-bit float round trip. It matches
+    /// <see cref="JsonNode.DeepEquals"/> (objects equal whatever their key order but only with the same key set, arrays element by element in
+    /// order, null equal to null, strings and booleans exact) except for numbers. Two numbers that both read as a
+    /// <c>long</c> are compared as longs, so integers above 2^53 stay exact; otherwise two numbers are equal when they are
+    /// the same 32-bit float, which makes <c>0.6</c> equal to <c>0.600000024</c> (what the editor writes back) and <c>1</c>
+    /// equal to <c>1.0</c>. Without this every echo of a float property looked like an edit by somebody else.
+    /// </summary>
+    public static bool ValuesEqual( JsonNode a, JsonNode b )
+    {
+        if ( (object)a == (object)b )
+        {
+            return true;
+        }
+        if ( a is null || b is null )
+        {
+            return false;
+        }
+        if ( a is JsonObject objectA )
+        {
+            if ( b is not JsonObject objectB || objectA.Count != objectB.Count )
+            {
+                return false;
+            }
+            foreach ( KeyValuePair<string, JsonNode> member in objectA )
+            {
+                if ( !objectB.TryGetPropertyValue( member.Key, out JsonNode other ) || !ValuesEqual( member.Value, other ) )
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+        if ( a is JsonArray arrayA )
+        {
+            if ( b is not JsonArray arrayB || arrayA.Count != arrayB.Count )
+            {
+                return false;
+            }
+            for ( int i = 0; i < arrayA.Count; i++ )
+            {
+                if ( !ValuesEqual( arrayA[i], arrayB[i] ) )
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+        if ( b is JsonObject || b is JsonArray )
+        {
+            return false;
+        }
+        if ( a.GetValueKind() == System.Text.Json.JsonValueKind.Number && b.GetValueKind() == System.Text.Json.JsonValueKind.Number )
+        {
+            return NumbersEqual( a, b );
+        }
+        return JsonNode.DeepEquals( a, b );
+    }
+
+    // Reads the numbers through their JSON text, which is the same whether a node was parsed off the wire or built in code
+    // (a JsonValue made from an int does not report TryGetValue<long>). Exactly equal numbers are settled first, so the
+    // common unchanged case never parses anything.
+    private static bool NumbersEqual( JsonNode a, JsonNode b )
+    {
+        if ( JsonNode.DeepEquals( a, b ) )
+        {
+            return true;
+        }
+        string textA = a.ToJsonString();
+        string textB = b.ToJsonString();
+        System.Globalization.CultureInfo invariant = System.Globalization.CultureInfo.InvariantCulture;
+        if ( long.TryParse( textA, System.Globalization.NumberStyles.AllowLeadingSign, invariant, out long longA ) && long.TryParse( textB, System.Globalization.NumberStyles.AllowLeadingSign, invariant, out long longB ) )
+        {
+            return longA == longB;
+        }
+        if ( double.TryParse( textA, System.Globalization.NumberStyles.Float, invariant, out double doubleA ) && double.TryParse( textB, System.Globalization.NumberStyles.Float, invariant, out double doubleB ) )
+        {
+            return (float)doubleA == (float)doubleB;
+        }
+        return false;
     }
 
     public static Dictionary<string, ObjectState> Map(IEnumerable<ObjectState> objects)

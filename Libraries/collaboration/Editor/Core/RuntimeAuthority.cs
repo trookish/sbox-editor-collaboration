@@ -496,7 +496,7 @@ public sealed class RuntimeAuthority
         {
             return false;
         }
-        return JsonNode.DeepEquals(objectState.Data, objectState2.Data);
+        return StateRules.ValuesEqual(objectState.Data, objectState2.Data);
     }
 
     private long CurrentRevision(string runId)
