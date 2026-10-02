@@ -37,6 +37,12 @@ if (args.Length >= 2 && args[0] == "worker")
     Environment.Exit(await WorkerConformance.Run(args[1], args.Length >= 3 ? args[2] : null));
 }
 
+// `embedded` runs the same conformance suite against the host-run relay (Connect/EmbeddedRelay.cs), started in-process. See EmbeddedConformance.cs.
+if (args.Length >= 1 && args[0] == "embedded")
+{
+    Environment.Exit(EmbeddedConformance.Run());
+}
+
 // `measure <relay url> [seconds] [pingMs]` counts the WebSocket messages a two-person session sends a relay. See MeasureUsage.cs.
 if (args.Length >= 2 && args[0] == "measure")
 {
