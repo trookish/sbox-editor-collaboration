@@ -121,9 +121,9 @@ public sealed class HeldPacketBuffer
         held.Clear();
     }
 
-    /// <summary>Whether a packet kind changes scene state and therefore has to wait for play to end.</summary>
+    /// <summary>Whether a packet kind changes scene state and therefore has to wait for play to end. A settings broadcast changes the scene's own settings.</summary>
     public static bool IsSceneChange(string kind)
     {
-        return kind == "snapshot" || kind == "accepted";
+        return kind == "snapshot" || kind == "accepted" || kind == SettingsMerge.PacketKind;
     }
 }

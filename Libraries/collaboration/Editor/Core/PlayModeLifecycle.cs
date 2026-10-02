@@ -708,9 +708,9 @@ public static class ScenePacketRouting
 
     public static ScenePacketRouteResult RouteTrackedPacket(string packetKind, string? packetScene, IReadOnlyDictionary<string, object> trackedByScene, Func<object, bool> isPlaying, Func<object, string?> currentTargetPath, PlayModeLifecycle lifecycle, Func<object, RuntimeSessionDescriptor?> currentRuntime)
     {
-        if ((!(packetKind == "snapshot") && !(packetKind == "accepted")) || 1 == 0)
+        if (!(packetKind == "snapshot") && !(packetKind == "accepted") && !(packetKind == SettingsMerge.PacketKind))
         {
-            return Reject("Only snapshot and accepted packets use tracked-scene routing.");
+            return Reject("Only snapshot, accepted and settings packets use tracked-scene routing.");
         }
         string? text = CanonicalSceneKey(packetScene);
         if (text == null)
@@ -748,7 +748,7 @@ public static class PlayModeSourceCoexistence
 
     public static bool CanAdmitTrackedScenePacket(string packetKind, bool isPlaying, object? sourceSession, string? sourceScenePath, PlayModeLifecycle lifecycle, RuntimeSessionDescriptor? currentRuntime, string? packetScenePath)
     {
-        bool flag = ((packetKind == "snapshot" || packetKind == "accepted") ? true : false);
+        bool flag = packetKind == "snapshot" || packetKind == "accepted" || packetKind == SettingsMerge.PacketKind;
         return flag && CanAdmitTrackedSceneState(isPlaying, sourceSession, sourceScenePath, lifecycle, currentRuntime, packetScenePath);
     }
 

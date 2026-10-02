@@ -110,6 +110,18 @@ public sealed class Packet
     public bool Merged { get; set; }
 
     /// <summary>
+    /// Scene-level settings (<see cref="SettingsMerge"/>): on a subscribe, the subscriber's settings for the scene; on a snapshot, the host's;
+    /// on a client's <c>settings</c> packet, what the sender has now; on the host's <c>settings</c> broadcast, the merged result every member
+    /// adopts. Additive: omitted from the wire when unset, ignored by peers that predate it.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public JsonObject Settings { get; set; }
+
+    /// <summary>On a client's <c>settings</c> packet: the settings the sender last had confirmed by the host, the base of the three-way merge. Additive.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public JsonObject SettingsBefore { get; set; }
+
+    /// <summary>
     /// On a ping: the fingerprint (<see cref="SceneDigest"/>) of the scene state this client last had confirmed by the host, so the
     /// host can notice an editor that has silently drifted. Additive: omitted from the wire when unset, and a host that predates it ignores it.
     /// </summary>
@@ -711,6 +723,12 @@ public sealed class Authority
 
     public Dictionary<string, Dictionary<string, ObjectState>> Scenes { get; } = new Dictionary<string, Dictionary<string, ObjectState>>();
 
+    /// <summary>
+    /// The host's scene-level settings per scene, taken from the first subscribe that created the scene and changed only through
+    /// <see cref="ApplySettings"/>. A scene whose first subscriber sent none has no entry.
+    /// </summary>
+    public Dictionary<string, JsonObject> SceneSettings { get; } = new Dictionary<string, JsonObject>();
+
     public long Revision { get; private set; }
 
     public Authority(Action<Packet> persist)
@@ -728,17 +746,100 @@ public sealed class Authority
             {
                 Kind = "seed",
                 Scene = p.Scene,
-                Objects = p.Objects
+                Objects = p.Objects,
+                Settings = p.Settings
             });
             Scenes.Add(p.Scene, dictionary);
+            // No size bound here: the subscribe packet has already arrived whole, and refusing the settings would leave the scene with
+            // none, which every later change would then replace wholesale. The bound applies to changes, which are rebroadcast.
+            if (p.Settings != null)
+            {
+                SceneSettings[p.Scene] = SettingsMerge.Clone(p.Settings);
+            }
         }
+        // The snapshot is a copy: the same packet goes to a drift resync and, in-process, to tests that may change it.
         return new Packet
         {
             Kind = "snapshot",
             Scene = p.Scene,
             Objects = Scenes[p.Scene].Values.ToList(),
+            Settings = SettingsMerge.Clone(SceneSettings.GetValueOrDefault(p.Scene)),
             Revision = Revision
         };
+    }
+
+    /// <summary>
+    /// Applies one member's change to a scene's settings (<see cref="SettingsMerge"/>): merged per top-level key against what the host holds,
+    /// later change wins on a clash with the key named in <see cref="Packet.Notice"/>. Returns the <c>settings</c> packet to broadcast (the
+    /// merged settings, sender, id and new revision, also what the journal records) or a <c>reject</c> for the sender alone. A resent packet
+    /// gets the receipt it got the first time, as <see cref="Apply"/> does.
+    /// </summary>
+    public Packet ApplySettings(Packet p)
+    {
+        string key = p.Peer + ":" + p.Id;
+        if (receipts.TryGetValue(key, out var value))
+        {
+            return value;
+        }
+        try
+        {
+            if (p.Scene == null || !Scenes.ContainsKey(p.Scene))
+            {
+                throw new InvalidOperationException("Subscribe to scene first");
+            }
+            if (p.Settings == null || p.SettingsBefore == null)
+            {
+                throw new InvalidOperationException("A scene settings change must carry the settings before and after the change.");
+            }
+            string sizeError = SettingsMerge.SizeError(p.Settings) ?? SettingsMerge.SizeError(p.SettingsBefore);
+            if (sizeError != null)
+            {
+                throw new InvalidOperationException(sizeError);
+            }
+            JsonObject merged;
+            List<string> clashed;
+            if (!SceneSettings.TryGetValue(p.Scene, out JsonObject current))
+            {
+                // Nothing to merge with: the scene's first subscriber reported no settings. The change is adopted whole.
+                merged = SettingsMerge.Clone(p.Settings);
+                clashed = new List<string>();
+            }
+            else if (!SettingsMerge.TryMerge(current, p.SettingsBefore, p.Settings, out merged, out clashed))
+            {
+                throw new InvalidOperationException("The scene settings change could not be merged with the host's settings.");
+            }
+            sizeError = SettingsMerge.SizeError(merged);
+            if (sizeError != null)
+            {
+                throw new InvalidOperationException(sizeError);
+            }
+            value = new Packet
+            {
+                Kind = SettingsMerge.PacketKind,
+                Id = p.Id,
+                Peer = p.Peer,
+                Scene = p.Scene,
+                Settings = SettingsMerge.Clone(merged),
+                Revision = Revision + 1,
+                Merged = clashed.Count > 0 || !StateRules.ValuesEqual(merged, p.Settings),
+                Notice = SettingsMerge.ClashNotice(clashed)
+            };
+            persist(value);
+            Revision++;
+            SceneSettings[p.Scene] = merged;
+        }
+        catch (Exception ex)
+        {
+            value = new Packet
+            {
+                Kind = "reject",
+                Id = p.Id,
+                Scene = p.Scene,
+                Error = ex.Message
+            };
+        }
+        receipts[key] = value;
+        return value;
     }
 
     public Packet Apply(Packet p)
