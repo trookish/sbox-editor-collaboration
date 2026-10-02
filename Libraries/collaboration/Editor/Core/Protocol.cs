@@ -223,19 +223,56 @@ public static class Protocol
     }
 }
 
+/// <summary>A change the scan loop did not send, with the formal sentence telling the user why.</summary>
+public sealed record HeldChange( Change Change, string Reason );
+
 public static class StateRules
 {
     public const string Version = "teamcreate-1";
 
-    public static readonly HashSet<string> ObjectFields = new HashSet<string> { "Name", "Position", "Rotation", "Scale", "Enabled", "Tags" };
+    // The structural limits on one object, in one place. Nothing here asks whether a property or component type is on a list:
+    // every edit a person can make is synchronised, and these bounds only protect the host, the peers and the relay from a
+    // hostile or runaway payload. Each limit is inclusive (an object at exactly the limit passes).
 
-    public static readonly Dictionary<string, HashSet<string>> ComponentFields = new Dictionary<string, HashSet<string>>
+    /// <summary>Largest serialised <see cref="ObjectState"/>, in UTF-8 bytes of its JSON.</summary>
+    public const int MaxObjectBytes = 1024 * 1024;
+
+    /// <summary>
+    /// Deepest JSON nesting inside an object's data, counting the data object itself as level 1. System.Text.Json refuses to
+    /// write or read beyond 64 levels, and the data travels inside envelopes: a packet adds four levels (packet, change list,
+    /// change, After), the outbox file one more and the failure report two more. 56 leaves those envelopes room with a margin
+    /// of two, so an object that passes here can always be sent, stored and reported.
+    /// </summary>
+    public const int MaxDataDepth = 56;
+
+    /// <summary>Most components on one object.</summary>
+    public const int MaxComponents = 256;
+
+    /// <summary>Largest single text value, in UTF-8 bytes.</summary>
+    public const int MaxStringBytes = 256 * 1024;
+
+    /// <summary>Longest property name, in characters.</summary>
+    public const int MaxKeyLength = 200;
+
+    /// <summary>Longest component type name, in characters.</summary>
+    public const int MaxTypeNameLength = 200;
+
+    /// <summary>
+    /// The reserved (<c>__</c>) property names the engine and this library are known to write. Observed in the scenes and
+    /// prefabs installed with s&amp;box: <c>__guid</c>, <c>__version</c>, <c>__type</c>, <c>__enabled</c>, <c>__references</c>,
+    /// <c>__Prefab</c>, <c>__PrefabInstancePatch</c>, <c>__PrefabIdToInstanceId</c> (scenes) and <c>__properties</c>,
+    /// <c>__variables</c> (prefabs). Read or written by the engine's own serializer (GameObject and Component in
+    /// Sandbox.Engine): <c>__PrefabVariables</c>, <c>__EditorPrefabNestedInstance</c>, <c>__EditorSkipPrefabBreakOnRefresh</c>,
+    /// <c>__NetworkedPrefaInstance</c> (the engine's spelling), <c>__snapshot</c>. <c>__PrefabVariant</c> is listed because
+    /// the engine is expected to write it, though no installed sample carries it. <see cref="SiblingOrder.Key"/> is the library's own.
+    /// A name outside this set is not refused (a newer engine may add one, and refusing it would stop the session's work);
+    /// <see cref="FindUnknownReservedKeys"/> reports it so it can be counted.
+    /// </summary>
+    public static readonly IReadOnlySet<string> KnownReservedKeys = new HashSet<string>( StringComparer.Ordinal )
     {
-        ["Sandbox.ModelRenderer"] = new HashSet<string> { "Tint" },
-        ["Sandbox.CameraComponent"] = new HashSet<string> { "FieldOfView", "BackgroundColor", "Orthographic", "OrthographicHeight", "ZNear", "ZFar" },
-        ["Sandbox.DirectionalLight"] = new HashSet<string> { "LightColor", "SkyColor", "Shadows" },
-        ["Sandbox.PointLight"] = new HashSet<string> { "LightColor", "Radius", "Shadows" },
-        ["Sandbox.BoxCollider"] = new HashSet<string> { "Center", "Scale", "IsTrigger" }
+        "__guid", "__version", "__type", "__enabled", "__references", "__Prefab", "__PrefabInstancePatch", "__PrefabIdToInstanceId",
+        "__properties", "__variables", "__PrefabVariables", "__EditorPrefabNestedInstance", "__EditorSkipPrefabBreakOnRefresh",
+        "__NetworkedPrefaInstance", "__snapshot", "__PrefabVariant", SiblingOrder.Key
     };
 
     public static bool Equal(ObjectState a, ObjectState b)
@@ -339,89 +376,298 @@ public static class StateRules
             select x).ToList();
     }
 
-    public static void ValidateChange(Change c)
+    /// <summary>Throws the formal refusal of <see cref="RefusalOf"/> when there is one.</summary>
+    public static void ValidateChange( Change c )
     {
-        if ((object)c.Before == null && (object)c.After == null)
+        string refusal = RefusalOf( c );
+        if ( refusal != null )
         {
-            throw new InvalidOperationException("Empty change");
+            throw new InvalidOperationException( refusal );
         }
-        foreach (ObjectState item in new ObjectState[2] { c.Before, c.After }.Where((ObjectState x) => (object)x != null))
+    }
+
+    /// <summary>
+    /// Why <paramref name="c"/> may not be sent or applied, as a formal sentence naming the object, or null when it may. Only
+    /// structure is checked: the change is a creation (no Before), an edit or a deletion (no After) of one identified object;
+    /// an edit keeps its identity; and the state that would be sent (After) is a well-formed object within the size limits.
+    /// Any property, any component type and any component property are allowed, as are adding, removing and reordering
+    /// components. Before is held to identity only: it is the state the host already holds, so an object that is already too
+    /// large can still be shrunk or deleted.
+    /// </summary>
+    public static string RefusalOf( Change c )
+    {
+        if ( c is null || ( (object)c.Before == null && (object)c.After == null ) )
         {
-            if (!Guid.TryParse(c.Id, out var _) || item.Id != c.Id || item.Data["__guid"]?.GetValue<string>() != c.Id)
+            return "An empty change was not sent.";
+        }
+        foreach ( ObjectState state in new[] { c.Before, c.After } )
+        {
+            if ( (object)state != null && !HasIdentity( c.Id, state ) )
             {
-                throw new InvalidOperationException("Invalid object identity");
-            }
-            if (item.Data.Any((KeyValuePair<string, JsonNode> p) => p.Key.Contains("Prefab", StringComparison.OrdinalIgnoreCase)))
-            {
-                throw new InvalidOperationException("Prefab edits are not supported");
+                return "The object \"" + NameOf( state, c.Id ) + "\" does not have a valid identifier and was not sent.";
             }
         }
-        if ((object)c.Before == null || (object)c.After == null)
+        return (object)c.After == null ? null : RefusalOfState( c.After );
+    }
+
+    // The id is a GUID, the state carries that id and its data names the same one in __guid, so no edit changes an identity.
+    private static bool HasIdentity( string id, ObjectState state )
+    {
+        return Guid.TryParse( id, out _ )
+            && string.Equals( state.Id, id, StringComparison.Ordinal )
+            && state.Data is not null
+            && state.Data["__guid"] is JsonValue guid && guid.TryGetValue( out string text ) && string.Equals( text, id, StringComparison.Ordinal );
+    }
+
+    // The structural rules on one state that is about to be sent. The tree walk comes first: it bounds the depth, so the
+    // serialisation that measures the size cannot fail on a payload nested too deep to write.
+    private static string RefusalOfState( ObjectState state )
+    {
+        string name = "The object \"" + NameOf( state, state.Id ) + "\" ";
+        string walk = RefusalOfTree( state.Data, 1 );
+        if ( walk != null )
         {
-            ObjectState objectState = c.Before ?? c.After;
-            if (!(objectState.Data["Components"] is JsonArray jsonArray))
+            return name + walk;
+        }
+        if ( state.Data.TryGetPropertyValue( "Components", out JsonNode list ) )
+        {
+            if ( list is not JsonArray components )
             {
-                return;
+                return name + "has a component list that is not a list and was not sent.";
             }
+            if ( components.Count > MaxComponents )
             {
-                foreach (JsonNode item2 in jsonArray)
+                return name + "has more than " + MaxComponents + " components, beyond the collaboration limit, and was not sent.";
+            }
+            HashSet<string> guids = new HashSet<string>( StringComparer.Ordinal );
+            foreach ( JsonNode entry in components )
+            {
+                if ( entry is not JsonObject component )
                 {
-                    JsonObject jsonObject = item2.AsObject();
-                    string type = jsonObject["__type"].GetValue<string>();
-                    if (!ComponentFields.ContainsKey(type))
-                    {
-                        throw new InvalidOperationException("Creation/deletion of " + type + " is not supported");
-                    }
-                    if (jsonObject.Any((KeyValuePair<string, JsonNode> x) => !SafeRenderOptions(x) && (x.Value is JsonObject { Count: >0 } || (x.Value is JsonArray jsonArray4 && jsonArray4.Count > 0))))
-                    {
-                        throw new InvalidOperationException("Creation/deletion of components with embedded graphs or object references is not supported");
-                    }
-                    bool SafeRenderOptions(KeyValuePair<string, JsonNode> field)
-                    {
-                        return type == "Sandbox.ModelRenderer" && field.Key == "RenderOptions" && field.Value is JsonObject source && source.All((KeyValuePair<string, JsonNode> x) => new ReadOnlySpan<string>(new string[4] { "GameLayer", "OverlayLayer", "BloomLayer", "AfterUILayer" }).Contains(x.Key) && x.Value is JsonValue jsonValue && jsonValue.TryGetValue<bool>(out var _));
-                    }
+                    return name + "has a component entry that is not an object and was not sent.";
                 }
-                return;
+                if ( component["__type"] is not JsonValue typeValue || !typeValue.TryGetValue( out string type ) || string.IsNullOrEmpty( type ) )
+                {
+                    return name + "has a component without a type name and was not sent.";
+                }
+                if ( type.Length > MaxTypeNameLength )
+                {
+                    return name + "has a component type name longer than " + MaxTypeNameLength + " characters and was not sent.";
+                }
+                if ( component["__guid"] is not JsonValue guidValue || !guidValue.TryGetValue( out string guid ) || !Guid.TryParse( guid, out _ ) )
+                {
+                    return name + "has a component without a valid identifier and was not sent.";
+                }
+                if ( !guids.Add( guid ) )
+                {
+                    return name + "has two components with the identifier " + guid + " and was not sent.";
+                }
             }
         }
-        foreach (string item3 in c.Before.Data.Select((KeyValuePair<string, JsonNode> x) => x.Key).Union(c.After.Data.Select((KeyValuePair<string, JsonNode> x) => x.Key)))
+        if ( System.Text.Json.JsonSerializer.SerializeToUtf8Bytes( state ).Length > MaxObjectBytes )
         {
-            if (ValuesEqual(c.Before.Data[item3], c.After.Data[item3]) || ObjectFields.Contains(item3))
+            return name + "is larger than the " + MaxObjectBytes / ( 1024 * 1024 ) + " MiB collaboration limit and was not sent.";
+        }
+        return null;
+    }
+
+    // Depth, property names and text sizes, everywhere in the tree. `depth` is the level of `node` (the data object is 1).
+    private static string RefusalOfTree( JsonNode node, int depth )
+    {
+        if ( node is JsonObject obj )
+        {
+            if ( depth > MaxDataDepth )
             {
-                continue;
+                return DepthRefusal();
             }
-            if (item3 != "Components")
+            foreach ( KeyValuePair<string, JsonNode> member in obj )
             {
-                throw new InvalidOperationException("Unsupported GameObject property: " + item3);
-            }
-            JsonArray jsonArray2 = c.Before.Data[item3].AsArray();
-            JsonArray jsonArray3 = c.After.Data[item3].AsArray();
-            if (jsonArray2.Count != jsonArray3.Count)
-            {
-                throw new InvalidOperationException("Component addition/removal is not supported");
-            }
-            for (int num = 0; num < jsonArray2.Count; num++)
-            {
-                JsonObject jsonObject2 = jsonArray2[num].AsObject();
-                JsonObject jsonObject3 = jsonArray3[num].AsObject();
-                string value = jsonObject2["__type"].GetValue<string>();
-                foreach (string item4 in jsonObject2.Select((KeyValuePair<string, JsonNode> x) => x.Key).Union(jsonObject3.Select((KeyValuePair<string, JsonNode> x) => x.Key)))
+                if ( member.Key.Length == 0 )
                 {
-                    if (!ValuesEqual(jsonObject2[item4], jsonObject3[item4]))
+                    return "contains an empty property name and was not sent.";
+                }
+                if ( member.Key.Length > MaxKeyLength )
+                {
+                    return "contains a property name longer than " + MaxKeyLength + " characters and was not sent.";
+                }
+                string inner = RefusalOfTree( member.Value, depth + 1 );
+                if ( inner != null )
+                {
+                    return inner;
+                }
+            }
+            return null;
+        }
+        if ( node is JsonArray array )
+        {
+            if ( depth > MaxDataDepth )
+            {
+                return DepthRefusal();
+            }
+            foreach ( JsonNode item in array )
+            {
+                string inner = RefusalOfTree( item, depth + 1 );
+                if ( inner != null )
+                {
+                    return inner;
+                }
+            }
+            return null;
+        }
+        if ( node is JsonValue value && value.TryGetValue( out string text ) && System.Text.Encoding.UTF8.GetByteCount( text ) > MaxStringBytes )
+        {
+            return "contains a text value larger than the " + MaxStringBytes / 1024 + " KiB collaboration limit and was not sent.";
+        }
+        return null;
+    }
+
+    private static string DepthRefusal() => "is nested more than " + MaxDataDepth + " levels deep, beyond the collaboration limit, and was not sent.";
+
+    /// <summary>
+    /// The reserved (<c>__</c>) property names anywhere in <paramref name="data"/> that are not in <see cref="KnownReservedKeys"/>,
+    /// each once, in the order they are first met. They are allowed; the caller counts or logs them.
+    /// </summary>
+    public static List<string> FindUnknownReservedKeys( JsonObject data )
+    {
+        List<string> found = new List<string>();
+        Visit( data );
+        return found;
+
+        void Visit( JsonNode node )
+        {
+            if ( node is JsonObject obj )
+            {
+                foreach ( KeyValuePair<string, JsonNode> member in obj )
+                {
+                    if ( member.Key.StartsWith( "__", StringComparison.Ordinal ) && !KnownReservedKeys.Contains( member.Key ) && !found.Contains( member.Key ) )
                     {
-                        if (!ComponentFields.TryGetValue(value, out var value2) || !value2.Contains(item4))
-                        {
-                            throw new InvalidOperationException("Unsupported inspector property: " + value + "." + item4);
-                        }
-                        if (!(jsonObject3[item4] is JsonValue))
-                        {
-                            throw new InvalidOperationException("Only scalar inspector values are supported");
-                        }
+                        found.Add( member.Key );
                     }
+                    Visit( member.Value );
+                }
+            }
+            else if ( node is JsonArray array )
+            {
+                foreach ( JsonNode item in array )
+                {
+                    Visit( item );
                 }
             }
         }
     }
+
+    /// <summary>
+    /// Splits the scan loop's batch into what is sent and what is held. A change that <see cref="RefusalOf"/> refuses is held
+    /// with its refusal, and so is every change that would leave the host's scene inconsistent without it: an object whose
+    /// parent is held (or otherwise absent), and the deletion of an object that a held state still names as its parent. The
+    /// rest is returned in the original order and, applied to <paramref name="known"/>, always passes <see cref="ValidateGraph"/>.
+    /// Holding one object's change keeps the session running: the others are sent, and the held object stays as the session
+    /// last confirmed it until its edit fits again.
+    /// </summary>
+    public static List<Change> SendableChanges( IReadOnlyDictionary<string, ObjectState> known, IEnumerable<Change> changes, List<HeldChange> held )
+    {
+        List<Change> all = changes.ToList();
+        Dictionary<string, string> reasons = new Dictionary<string, string>( StringComparer.Ordinal );
+        List<string> order = new List<string>();
+        void Hold( Change change, string reason )
+        {
+            reasons[change.Id] = reason;
+            order.Add( change.Id );
+        }
+
+        foreach ( Change change in all )
+        {
+            string refusal = RefusalOf( change );
+            if ( refusal != null )
+            {
+                Hold( change, refusal );
+            }
+        }
+
+        Dictionary<string, ObjectState> result = null;
+        bool settled = false;
+        while ( !settled )
+        {
+            settled = true;
+            result = Result( known, all, reasons );
+            foreach ( Change change in all.Where( x => !reasons.ContainsKey( x.Id ) ) )
+            {
+                if ( (object)change.After != null && !string.IsNullOrEmpty( change.After.Parent ) && !result.ContainsKey( change.After.Parent ) )
+                {
+                    Hold( change, "The object \"" + NameOf( change.After, change.Id ) + "\" was not sent because its parent \"" + NameIn( all, known, change.After.Parent ) + "\" was not sent." );
+                    settled = false;
+                }
+                else if ( (object)change.After == null && result.Values.FirstOrDefault( x => string.Equals( x.Parent, change.Id, StringComparison.Ordinal ) ) is { } child )
+                {
+                    Hold( change, "The deletion of \"" + NameOf( change.Before, change.Id ) + "\" was not sent because its child \"" + NameOf( child, child.Id ) + "\" was not sent." );
+                    settled = false;
+                }
+            }
+        }
+
+        // Anything the rules above did not foresee (a component identity used by two objects, a parenting cycle) holds the
+        // whole batch rather than letting the host refuse it.
+        try
+        {
+            ValidateGraph( result );
+        }
+        catch ( InvalidOperationException ex )
+        {
+            foreach ( Change change in all.Where( x => !reasons.ContainsKey( x.Id ) ).ToList() )
+            {
+                Hold( change, "The change to \"" + NameOf( change.After ?? change.Before, change.Id ) + "\" was not sent because the scene would not stay consistent (" + ex.Message + ")." );
+            }
+        }
+
+        foreach ( string id in order )
+        {
+            held.Add( new HeldChange( all.First( x => x.Id == id ), reasons[id] ) );
+        }
+        return all.Where( x => !reasons.ContainsKey( x.Id ) ).ToList();
+    }
+
+    private static Dictionary<string, ObjectState> Result( IReadOnlyDictionary<string, ObjectState> known, List<Change> all, Dictionary<string, string> reasons )
+    {
+        Dictionary<string, ObjectState> result = known.ToDictionary( x => x.Key, x => x.Value );
+        foreach ( Change change in all.Where( x => !reasons.ContainsKey( x.Id ) ) )
+        {
+            if ( (object)change.After == null )
+            {
+                result.Remove( change.Id );
+            }
+            else
+            {
+                result[change.Id] = change.After;
+            }
+        }
+        return result;
+    }
+
+    // The name of an object the batch or the session knows, for a sentence about it.
+    private static string NameIn( List<Change> all, IReadOnlyDictionary<string, ObjectState> known, string id )
+    {
+        Change change = all.FirstOrDefault( x => x.Id == id );
+        ObjectState state = change?.After ?? change?.Before ?? known.GetValueOrDefault( id );
+        return (object)state == null ? id : NameOf( state, id );
+    }
+
+    /// <summary>The name a person recognises an object by (its Name, shortened when very long), or its id when it has none.</summary>
+    public static string NameOf( ObjectState state, string id )
+    {
+        if ( state?.Data?["Name"] is JsonValue value && value.TryGetValue( out string name ) && !string.IsNullOrEmpty( name ) )
+        {
+            return name.Length <= 100 ? name : name.Substring( 0, 100 ) + "...";
+        }
+        return id ?? state?.Id;
+    }
+
+    /// <summary>The notice for a component type the sender has and this project lacks; shown once per type.</summary>
+    public static string MissingComponentTypeNotice( string type ) =>
+        "The component type \"" + type + "\" is not available in your project. Update your code to see it.";
+
+    /// <summary>The notice for an object that stopped being saved with the scene (for example, marked as not saved).</summary>
+    public static string NoLongerSavedNotice( string name ) =>
+        "The object \"" + name + "\" can no longer be saved with the scene, so it was removed from the shared scene.";
 
     public static void ValidateGraph(Dictionary<string, ObjectState> objects)
     {

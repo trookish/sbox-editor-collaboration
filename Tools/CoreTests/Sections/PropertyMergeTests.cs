@@ -127,8 +127,8 @@ static class PropertyMergeTests
         RuntimeFloatNoise( assert );
     }
 
-    // ValidateChange decides which properties an edit changed in order to refuse the unsupported ones. An editor echo of an
-    // untouched unsupported property (0.6 written back as 0.600000024) is not a change, so it must not refuse the whole edit.
+    // ValidateChange once refused every property outside a short allowlist; it now checks structure only, so an editor echo
+    // (0.6 written back as 0.600000024) and a real change of any property are both accepted.
     static void ValidationFloatNoise( Action<bool, string> assert )
     {
         var before = Edited( Cube( "Cube", "0,0,0", "", Renderer() ), d => { d["Mass"] = 0.6; d["Components"]!.AsArray()[0]!["Opacity"] = 0.6; } );
@@ -142,9 +142,9 @@ static class PropertyMergeTests
         }
         assert( Refusal( before, echoed ) == null, "merge_validate_float_echo_of_unsupported_properties_is_not_a_change: " + Refusal( before, echoed ) );
         var realTop = Edited( before, d => d["Mass"] = 0.61 );
-        assert( Refusal( before, realTop ) == "Unsupported GameObject property: Mass", "merge_validate_real_change_of_an_unsupported_property_is_still_refused: " + Refusal( before, realTop ) );
+        assert( Refusal( before, realTop ) == null, "merge_validate_real_change_of_any_object_property_is_accepted: " + Refusal( before, realTop ) );
         var realComponent = Edited( before, d => { d["Components"]!.AsArray()[0]!["Tint"] = "0,1,0,1"; d["Components"]!.AsArray()[0]!["Opacity"] = 0.61; } );
-        assert( Refusal( before, realComponent ) == "Unsupported inspector property: Sandbox.ModelRenderer.Opacity", "merge_validate_real_change_of_an_unsupported_component_field_is_still_refused: " + Refusal( before, realComponent ) );
+        assert( Refusal( before, realComponent ) == null, "merge_validate_real_change_of_any_component_field_is_accepted: " + Refusal( before, realComponent ) );
     }
 
     // The runtime authority keeps its own stale-edit check; it compares object data too, so an editor echo of
@@ -559,19 +559,19 @@ static class PropertyMergeTests
             assert( again.Kind == "reject" && again.Error.StartsWith( "Conflict on " + gone.Id, StringComparison.Ordinal ), "merge_deleting_an_already_deleted_object_stays_a_conflict: " + again.Kind + " " + again.Error );
         }
 
-        // The restore route must pass the creation rules: a sender cannot bring an object back (or into being) around them by
-        // claiming a stale Before that already carries a component type the host does not allow to be created.
+        // The restore route must pass the structural rules: a sender cannot bring an object back (or into being) around them by
+        // claiming a stale Before that already carries a malformed component (here, one without a type name).
         {
             var original = Cube( "Cube", "0,0,0", "", Renderer() );
             var authority = Seeded( out var journal, original );
             authority.Apply( Edit( "peer-a", new Change( original.Id, original, null ) ) );
             var revision = authority.Revision;
             var count = journal.Count;
-            var foreign = new JsonObject { ["__guid"] = Guid.NewGuid().ToString(), ["__type"] = "Sandbox.NotAllowedToBeCreated" };
+            var foreign = new JsonObject { ["__guid"] = Guid.NewGuid().ToString(), ["__type"] = "" };
             var claimedBefore = Edited( original, d => d["Components"]!.AsArray().Add( foreign.DeepClone() ) );
             var claimedAfter = With( claimedBefore, "Name", "Smuggled" );
             var smuggle = authority.Apply( Edit( "peer-b", new Change( original.Id, claimedBefore, claimedAfter ) ) );
-            assert( smuggle.Kind == "reject" && smuggle.Error.Contains( "Creation/deletion of Sandbox.NotAllowedToBeCreated is not supported", StringComparison.Ordinal ), "merge_restore_applies_the_creation_rules_to_what_it_brings_back: " + smuggle.Kind + " " + smuggle.Error );
+            assert( smuggle.Kind == "reject" && smuggle.Error.Contains( "has a component without a type name", StringComparison.Ordinal ), "merge_restore_applies_the_structural_rules_to_what_it_brings_back: " + smuggle.Kind + " " + smuggle.Error );
             assert( authority.Revision == revision && journal.Count == count && !authority.Scenes[Scene].ContainsKey( original.Id ), "merge_refused_restore_changes_nothing" );
         }
 
@@ -594,7 +594,8 @@ static class PropertyMergeTests
             // The sender's copy of the object is one whose component carries no guid (a damaged or foreign copy).
             var staleBefore = Cube( "Cube", "0,0,0", "", renderer ) with { Id = original.Id };
             staleBefore.Data["__guid"] = original.Id;
-            var staleAfter = Edited( staleBefore, d => d["Components"]!.AsArray()[0]!["Tint"] = "0,0,1,1" );
+            // Only the Before is damaged: the After the sender would send passes the structural rules, so the merge is what refuses.
+            var staleAfter = Edited( staleBefore, d => { d["Components"]!.AsArray()[0]!["Tint"] = "0,0,1,1"; d["Components"]!.AsArray()[0]!["__guid"] = Guid.NewGuid().ToString(); } );
             authority.Apply( Edit( "peer-a", new Change( original.Id, original, With( original, "Name", "Renamed" ) ) ) );
             var revision = authority.Revision;
             var count = journal.Count;
@@ -634,13 +635,13 @@ static class PropertyMergeTests
             assert( mixed.Kind == "reject" && Text( HostState( atomic, one.Id ), "Position" ) == "0,0,0" && Text( HostState( atomic, one.Id ), "Name" ) == "Renamed", "merge_one_unmergeable_change_rejects_the_whole_operation_including_merges: " + mixed.Kind );
         }
 
-        // Validation of the sender's own change still comes first: a merge never lets an unsupported property through.
+        // Any property merges now, network settings included: a stale edit of NetworkMode is combined with the concurrent rename.
         {
             var original = Cube( "Cube", "0,0,0" );
             var authority = Seeded( out _, original );
             authority.Apply( Edit( "peer-a", new Change( original.Id, original, With( original, "Name", "Renamed" ) ) ) );
-            var unsupported = authority.Apply( Edit( "peer-b", new Change( original.Id, original, With( original, "NetworkMode", 3 ) ) ) );
-            assert( unsupported.Kind == "reject" && unsupported.Error.Contains( "Unsupported GameObject property", StringComparison.Ordinal ) && !HostState( authority, original.Id ).Data.ContainsKey( "NetworkMode" ), "merge_unsupported_property_is_still_refused_on_a_stale_edit: " + unsupported.Kind + " " + unsupported.Error );
+            var network = authority.Apply( Edit( "peer-b", new Change( original.Id, original, With( original, "NetworkMode", 3 ) ) ) );
+            assert( network.Kind == "accepted" && HostState( authority, original.Id ).Data["NetworkMode"]!.GetValue<int>() == 3 && Text( HostState( authority, original.Id ), "Name" ) == "Renamed", "merge_network_mode_on_a_stale_edit_is_combined_with_the_concurrent_rename: " + network.Kind + " " + network.Error );
         }
 
         // Resending the same packet id returns the identical receipt and does nothing twice.
