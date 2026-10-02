@@ -3683,7 +3683,7 @@ Assert(authority.Apply(Edit("A",new Change(first.Id,currentFirst,null),new Chang
 var snapshot = authority.Subscribe(new() { Scene="scenes/test.scene", Objects=[first,second] });
 Assert(snapshot.Objects.Count==1 && snapshot.Objects[0].Data["Name"]!.GetValue<string>()=="independent", "late join gets authority, not obsolete baseline");
 var badData = (JsonObject)snapshot.Objects[0].Data.DeepClone(); badData["NetworkMode"]=1;
-Assert(authority.Apply(Edit("B",new Change(second.Id,snapshot.Objects[0],snapshot.Objects[0] with {Data=badData}))).Kind == "reject", "unsupported property fails visibly");
+Assert(authority.Apply(Edit("B",new Change(second.Id,snapshot.Objects[0],snapshot.Objects[0] with {Data=badData}))).Kind == "accepted", "a network settings edit is synchronised (it was refused while edits were allowlisted)");
 var brokenDisk = new Authority(_ => throw new IOException("disk full"));
 try { brokenDisk.Subscribe(new() {Scene="scenes/test.scene",Objects=[first]}); Assert(false,"disk failure"); } catch(IOException) { Assert(brokenDisk.Scenes.Count==0,"seed not accepted when persistence fails"); }
 bool failWrites=false;
@@ -6032,11 +6032,16 @@ var soloAfter = soloAuthority.Scenes["scenes/minimal.scene"].Values.Where( x => 
 Assert( soloAuthority.Scenes["scenes/minimal.scene"].Count == 1 && soloAfter.Single() == SoloScript.ObjectName, "after the script the scene holds only the original object: no cube left behind" );
 Assert( soloKnown.Count == 1 && soloKnown.ContainsKey( soloBaseId.ToString() ), "the collaborator's local copy tracks the same scene as the host" );
 
-// A creation that the host would refuse must be caught here, not in front of the user.
+// Any component type is accepted on creation now; only a malformed component (here, one without a valid identifier) is refused.
+var soloAnyType = SoloScript.NewCube( Guid.NewGuid(), Guid.NewGuid(), "0,0,0", "1,1,1,1" );
+((System.Text.Json.Nodes.JsonObject)((System.Text.Json.Nodes.JsonArray)soloAnyType.Data["Components"]!)[0]!)["__type"] = "Sandbox.SomeOtherComponent";
+var soloAnyTypeReceipt = soloAuthority.Apply( SoloEdit( "bot", SoloScript.Create( soloAnyType ) ) );
+Assert( soloAnyTypeReceipt.Kind == "accepted", "the host accepts any component type on creation: " + soloAnyTypeReceipt.Error );
+Assert( soloAuthority.Apply( SoloEdit( "bot", SoloScript.Delete( soloAnyType ) ) ).Kind == "accepted", "the any-type cube is deleted again, leaving the scene as the script found it" );
 var soloBadShape = SoloScript.NewCube( Guid.NewGuid(), Guid.NewGuid(), "0,0,0", "1,1,1,1" );
-((System.Text.Json.Nodes.JsonObject)((System.Text.Json.Nodes.JsonArray)soloBadShape.Data["Components"]!)[0]!)["__type"] = "Sandbox.SomeUnsupportedComponent";
-Assert( soloAuthority.Apply( SoloEdit( "bot", SoloScript.Create( soloBadShape ) ) ).Kind == "reject", "the host refuses an unsupported component type on creation (so the script's cube must stay a plain model renderer)" );
-Assert( SoloScript.NewCube( Guid.NewGuid(), Guid.NewGuid(), "0,0,0", "1,1,1,1" ).Data["Components"]!.AsArray()[0]!.AsObject()["__type"]!.GetValue<string>() == "Sandbox.ModelRenderer", "the cube's renderer is typed Sandbox.ModelRenderer, the one renderer type the host accepts on creation" );
+((System.Text.Json.Nodes.JsonObject)((System.Text.Json.Nodes.JsonArray)soloBadShape.Data["Components"]!)[0]!)["__guid"] = "not-a-guid";
+Assert( soloAuthority.Apply( SoloEdit( "bot", SoloScript.Create( soloBadShape ) ) ).Kind == "reject", "the host refuses a component without a valid identifier on creation" );
+Assert( SoloScript.NewCube( Guid.NewGuid(), Guid.NewGuid(), "0,0,0", "1,1,1,1" ).Data["Components"]!.AsArray()[0]!.AsObject()["__type"]!.GetValue<string>() == "Sandbox.ModelRenderer", "the cube's renderer is typed Sandbox.ModelRenderer" );
 
 // Geometry: orbit, facing and presence.
 var soloCenter = ( X: 100.0, Y: -40.0, Z: 25.0 );

@@ -109,7 +109,7 @@ public static class PropertyMerge
             }
             if ( !( inTarget == inBefore && StateRules.ValuesEqual( targetValue, beforeValue ) ) )
             {
-                AddClash( found, prefix + key );
+                AddClash( found, prefix + FieldName( prefix, key ) );
             }
             if ( inAfter )
             {
@@ -187,12 +187,33 @@ public static class PropertyMerge
             }
         }
 
-        JsonArray result = new JsonArray();
-        foreach ( JsonObject component in ordered.Where( x => !removed.Contains( GuidOf( x ) ) ) )
+        List<JsonObject> kept = ordered.Where( x => !removed.Contains( GuidOf( x ) ) ).Concat( appended ).ToList();
+        // Component order is one more field: when the incoming edit reordered the components it shares with its Before, its order
+        // is applied to them (the later edit wins; a clash when the host reordered them too). Components only one side knows keep
+        // their place relative to the others.
+        List<string> beforeOrder = beforeSet.Items.Select( GuidOf ).Where( afterSet.ByGuid.ContainsKey ).ToList();
+        List<string> afterOrder = afterSet.Items.Select( GuidOf ).Where( beforeSet.ByGuid.ContainsKey ).ToList();
+        if ( !beforeOrder.SequenceEqual( afterOrder ) )
         {
-            result.Add( component );
+            HashSet<string> shared = new HashSet<string>( afterOrder.Where( x => kept.Any( k => GuidOf( k ) == x ) ), StringComparer.Ordinal );
+            List<string> currentOrder = kept.Select( GuidOf ).Where( shared.Contains ).ToList();
+            List<string> wanted = afterOrder.Where( shared.Contains ).ToList();
+            if ( !currentOrder.SequenceEqual( wanted ) && !currentOrder.SequenceEqual( beforeOrder.Where( shared.Contains ) ) )
+            {
+                AddClash( found, "Component order" );
+            }
+            Dictionary<string, JsonObject> byGuid = kept.ToDictionary( GuidOf, x => x, StringComparer.Ordinal );
+            int next = 0;
+            for ( int i = 0; i < kept.Count; i++ )
+            {
+                if ( shared.Contains( GuidOf( kept[i] ) ) )
+                {
+                    kept[i] = byGuid[wanted[next++]];
+                }
+            }
         }
-        foreach ( JsonObject component in appended )
+        JsonArray result = new JsonArray();
+        foreach ( JsonObject component in kept )
         {
             result.Add( component );
         }
@@ -235,6 +256,24 @@ public static class PropertyMerge
     }
 
     private static string GuidOf( JsonObject component ) => component["__guid"].GetValue<string>();
+
+    // Library and engine keys at the top of an object are named as a person knows them; everything else by its own name. A
+    // field holding nested objects or arrays (a prefab patch, a material list, a mesh) is one unit: the later edit replaces it whole.
+    private static string FieldName( string prefix, string key )
+    {
+        if ( prefix.Length > 0 )
+        {
+            return key;
+        }
+        return key switch
+        {
+            SiblingOrder.Key => "Sibling order",
+            "__PrefabInstancePatch" => "Prefab overrides",
+            "__PrefabIdToInstanceId" => "Prefab object mapping",
+            "__Prefab" => "Prefab",
+            _ => key
+        };
+    }
 
     // "Sandbox.ModelRenderer" -> "ModelRenderer": the name a person recognises in the inspector.
     private static string TypeShort( JsonObject primary, JsonObject fallback )

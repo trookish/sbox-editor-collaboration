@@ -49,8 +49,6 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
 
         public JsonObject Settings;
 
-        public Dictionary<string, ObjectState> LastOrder;
-
         public DateTime DiskStamp;
 
         public DateTime StampMismatchSince;
@@ -2124,7 +2122,6 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                         DiskStamp = SceneAdapter.DiskStamp(text)
                     };
                     scenes[text] = value;
-                    value.LastOrder = value.Known;
                     wire.Send(new Packet
                     {
                         Kind = "subscribe",
@@ -2165,31 +2162,36 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                         throw new InvalidOperationException("Scene settings/metadata/navmesh changes are outside the supported edit set. Local changes retained.");
                     }
                     Dictionary<string, ObjectState> dictionary = SceneAdapter.Capture(sceneEditorSession3.Scene);
+                    List<string> scanNotices = new List<string> { SceneAdapter.TakeNotices() };
+                    // An object that is still in the scene but no longer saved with it (for example marked Not Saved) is absent from
+                    // the capture, so the diff below deletes it from the shared scene; the person is told once.
                     foreach (string item in value.Known.Keys.Except(dictionary.Keys))
                     {
                         GameObject gameObject = sceneEditorSession3.Scene.Directory.FindByGuid(Guid.Parse(item));
                         if (gameObject != null && gameObject.IsValid && !gameObject.IsDestroyed)
                         {
-                            throw new InvalidOperationException("Object became non-serializable instead of being deleted; edit is outside the supported set");
+                            scanNotices.Add(StateRules.NoLongerSavedNotice(StateRules.NameOf(value.Known[item], item)));
                         }
                     }
-                    SceneAdapter.ValidateSiblingOrder(value.LastOrder, dictionary);
-                    value.LastOrder = dictionary;
+                    // Sibling order is part of each object's state (SiblingOrder.Key), so a reorder is an ordinary change below.
                     List<Change> list = StateRules.Diff(value.Known, dictionary);
                     if (list.Count > 0)
                     {
                         lastLocalEdit = DateTime.UtcNow;
                     }
+                    // A change that breaks a structural limit is held back instead of ending the session: the rest of the batch is
+                    // sent, the held object stays as the session last confirmed it, and the reason is shown once.
+                    List<HeldChange> held = new List<HeldChange>();
+                    List<Change> sendable = StateRules.SendableChanges(value.Known, list, held);
+                    NoteHeldChanges(text, held, scanNotices);
+                    CountUnknownReservedKeys(sendable);
+                    SetMergeNotice(ChangeRebase.JoinNotices(scanNotices.ToArray()));
                     bool flag3 = continuousEdits == 0 && !Editor.Application.MouseButtons.HasFlag(MouseButtons.Left);
-                    if (list.Count == 0 && (!flag3 || value.Group.Count == 0))
+                    if (sendable.Count == 0 && (!flag3 || value.Group.Count == 0))
                     {
                         continue;
                     }
-                    foreach (Change item2 in list)
-                    {
-                        StateRules.ValidateChange(item2);
-                    }
-                    SendEdit(text, value, list, flag3);
+                    SendEdit(text, value, sendable, flag3);
                 }
             }
         }
@@ -2383,6 +2385,57 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
             return null;
         }
         return RuntimeSceneAdapter.Describe(gameEditorSession);
+    }
+
+    // The reason last shown for each held object, per scene, so a change held on every scan is announced once and again only
+    // when its reason changes. An object that is sent again is forgotten.
+    private readonly Dictionary<string, Dictionary<string, string>> heldReasons = new Dictionary<string, Dictionary<string, string>>();
+
+    private void NoteHeldChanges(string scene, List<HeldChange> held, List<string> notices)
+    {
+        if (!heldReasons.TryGetValue(scene, out Dictionary<string, string> shown))
+        {
+            shown = new Dictionary<string, string>();
+            heldReasons[scene] = shown;
+        }
+        foreach (string id in shown.Keys.Except(held.Select((HeldChange x) => x.Change.Id)).ToList())
+        {
+            shown.Remove(id);
+        }
+        foreach (HeldChange change in held)
+        {
+            if (!shown.TryGetValue(change.Change.Id, out string reason) || reason != change.Reason)
+            {
+                shown[change.Change.Id] = change.Reason;
+                notices.Add(change.Reason);
+                GlobalGameNamespace.Log.Warning("Collaboration: " + change.Reason);
+            }
+        }
+    }
+
+    // Reserved (__) property names outside StateRules.KnownReservedKeys are allowed, because a newer engine may write new ones;
+    // each distinct name is counted and logged once so it can be added to the known set.
+    private readonly HashSet<string> unknownReservedKeys = new HashSet<string>(StringComparer.Ordinal);
+
+    /// <summary>How many distinct reserved (<c>__</c>) property names outside the known set this editor has sent.</summary>
+    public int UnknownReservedKeyCount => unknownReservedKeys.Count;
+
+    private void CountUnknownReservedKeys(List<Change> changes)
+    {
+        foreach (Change change in changes)
+        {
+            if ((object)change.After == null)
+            {
+                continue;
+            }
+            foreach (string key in StateRules.FindUnknownReservedKeys(change.After.Data))
+            {
+                if (unknownReservedKeys.Add(key))
+                {
+                    GlobalGameNamespace.Log.Info("Collaboration: the scene uses the reserved property name \"" + key + "\", which is not in the known set; it is synchronised as is.");
+                }
+            }
+        }
     }
 
     private void SendEdit(string scene, Tracked tracked, List<Change> changes, bool final)
@@ -2635,7 +2688,6 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                 SceneAdapter.Apply(tracked2.Session, dictionary);
                 tracked2.Known = dictionary;
                 tracked2.Ready = true;
-                tracked2.LastOrder = SceneAdapter.Capture(tracked2.Session.Scene);
                 tracked2.Session.UndoSystem.Initialize();
                 tracked2.Group.Clear();
                 tracked2.Undo.Clear();
@@ -2713,7 +2765,6 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                     if (rebaseChangesScene)
                     {
                         SceneAdapter.Apply(tracked2.Session, rebased);
-                        tracked2.LastOrder = SceneAdapter.Capture(tracked2.Session.Scene);
                         tracked2.Session.UndoSystem.Initialize();
                         MirrorNativeUndo(tracked2);
                     }
@@ -2763,7 +2814,6 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                     if (flag)
                     {
                         SceneAdapter.Apply(tracked2.Session, dictionary2);
-                        tracked2.LastOrder = SceneAdapter.Capture(tracked2.Session.Scene);
                         tracked2.Session.UndoSystem.Initialize();
                         MirrorNativeUndo(tracked2);
                     }
