@@ -10,6 +10,11 @@ public sealed record ObjectState(string Id, string Parent, JsonObject Data);
 
 public sealed record Change(string Id, ObjectState Before, ObjectState After);
 
+/// <summary>
+/// One message on the wire. Every property that is unset (null, zero or false) is omitted from the JSON: a presence packet used to carry about twenty
+/// <c>"Field":null</c> entries, almost half of its 778 bytes, and presence is the one message sent thirty times a second by every editor. Receivers read
+/// a missing field as the same default, so older peers are unaffected in both directions.
+/// </summary>
 public sealed class Packet
 {
     public string Kind { get; set; }
@@ -18,46 +23,67 @@ public sealed class Packet
 
     public string Peer { get; set; }
 
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string Name { get; set; }
 
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string Project { get; set; }
 
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string Baseline { get; set; }
 
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string Token { get; set; }
 
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string Session { get; set; }
 
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string Scene { get; set; }
 
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string Error { get; set; }
 
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public long Revision { get; set; }
 
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public bool Final { get; set; }
 
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public List<ObjectState> Objects { get; set; }
 
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public List<Change> Changes { get; set; }
 
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public JsonObject Presence { get; set; }
 
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public int? ProtocolVersion { get; set; }
 
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public CollaborationMode? Mode { get; set; }
 
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string RuntimeRunId { get; set; }
 
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public long? RuntimeTick { get; set; }
 
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public long? RuntimeSequence { get; set; }
 
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string RuntimeOperationKind { get; set; }
 
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string SteamId { get; set; }
 
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string DisplayName { get; set; }
 
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string SteamToken { get; set; }
 
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
@@ -97,6 +123,14 @@ public sealed class Packet
     /// <summary>On a ping: the scene <see cref="Digest"/> describes.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string DigestScene { get; set; }
+
+    /// <summary>
+    /// On a presence packet: the sender's own monotonic milliseconds (<see cref="SessionClock"/>) when it was sent, so receivers can place the
+    /// sample in time and draw a smooth path instead of the latest raw value. Not wall-clock time, and meaningful only to the same sender's
+    /// later stamps. The host relays it untouched. Additive: omitted from the wire when 0, which is also how a peer that predates the field reads.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public double SentMs { get; set; }
 }
 
 public static class Protocol

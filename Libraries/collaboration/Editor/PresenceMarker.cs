@@ -7,7 +7,8 @@ namespace TeamCreate;
 /// Draws one collaborator as a floating blue sphere with their profile picture and name above it. Every call is
 /// a <c>Gizmo.Draw</c> primitive inside the caller's scope: nothing here creates, edits or serializes a scene
 /// object, so a marker can never end up in a saved scene. The proportions, colours and distance behaviour come
-/// from <see cref="PresenceStyle"/>, which has unit tests; this class only turns those numbers into draw calls.
+/// from <see cref="PresenceStyle"/>, which has unit tests; this class only turns those numbers into draw calls. The position and rotation it is
+/// given are the smoothed camera (<see cref="ApplySmoothing"/>) when the collaborator's smoother is ready, and the raw latest packet otherwise.
 /// </summary>
 public static class PresenceMarker
 {
@@ -34,6 +35,27 @@ public static class PresenceMarker
         public bool ShowFrustum;
 
         public Frustum? Frustum;
+    }
+
+    /// <summary>A camera as the smoother's engine-free pose: position and the rotation quaternion, scale left at one.</summary>
+    public static Pose PoseOf(Vector3 position, Rotation rotation)
+    {
+        return new Pose(position.x, position.y, position.z, rotation.x, rotation.y, rotation.z, rotation.w);
+    }
+
+    /// <summary>
+    /// Replaces the raw camera with the smoothed one (see <see cref="PeerSmoothing"/>), drawn a little behind live so that it can blend between two
+    /// samples. While the smoother is not ready (fewer than three samples or no clock estimate yet) the arguments are left alone, so the caller's
+    /// raw value is drawn: the marker may jump once when smoothing starts, which is preferred to the stutter the first few samples would give.
+    /// </summary>
+    public static void ApplySmoothing(PeerSmoothing smoothing, double localNowMs, ref Vector3 position, ref Rotation rotation)
+    {
+        if (smoothing == null || !smoothing.TryGetPose(localNowMs, out Pose pose))
+        {
+            return;
+        }
+        position = new Vector3(pose.X, pose.Y, pose.Z);
+        rotation = new Rotation(pose.Qx, pose.Qy, pose.Qz, pose.Qw);
     }
 
     private static readonly DateTime Epoch = DateTime.UtcNow;
