@@ -93,6 +93,31 @@ public static class SpectateWhitelist
     public static IReadOnlySet<string> AllowedProperties( string type ) =>
         type != null && Types.TryGetValue( type, out string[] names ) ? new HashSet<string>( names, StringComparer.Ordinal ) : new HashSet<string>();
 
+    /// <summary>
+    /// The properties of a CHANGED entry for a component whose type the receiver already holds: only listed names with plain-data values, and the
+    /// forced non-colliding value re-applied, so a later change cannot undo what creation enforced.
+    /// </summary>
+    public static JsonObject FilterProperties( string type, JsonObject properties )
+    {
+        var result = new JsonObject();
+        if ( !IsAllowedType( type ) || properties == null )
+        {
+            return result;
+        }
+        foreach ( string name in Types[type] )
+        {
+            if ( properties.TryGetPropertyValue( name, out JsonNode value ) && IsPlainData( value ) )
+            {
+                result[name] = value?.DeepClone();
+            }
+        }
+        if ( Forced.TryGetValue( type, out var forced ) )
+        {
+            result[forced.Property] = forced.Value.DeepClone();
+        }
+        return result;
+    }
+
     /// <summary>Exact, ordinal match against the list; null, empty, padded, differently cased or oversized names never match.</summary>
     public static bool IsAllowedType( string type ) => type != null && type.Length <= 64 && Types.ContainsKey( type );
 

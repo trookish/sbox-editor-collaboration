@@ -11,5 +11,6 @@ static partial class SharedPlayTests
         Roster( assert );
         Whitelist( assert );
         FreeFly( assert );
+        Sampler( assert );
     }
 }
