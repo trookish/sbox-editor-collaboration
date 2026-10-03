@@ -79,15 +79,30 @@ static partial class SharedPlayTests
         sampler = new PlaySampler();
         sampler.Sample( Scene( 500 ), 0 );
         var seen = new Dictionary<int, int>();
+        var roundOne = new HashSet<int>();
+        var roundTwo = new HashSet<int>();
         for ( int round = 1; round <= 3; round++ )
         {
-            foreach ( var frame in sampler.Sample( Scene( 500, i => i + 10 ), round * 50 ) )
+            foreach ( var frame in sampler.Sample( Scene( 500, i => i + round * 10 ), round * 50 ) )
             {
                 assert( frame.Moved.Count <= PlaySampler.MaxMovedPerFrame, "play_sampler_moved_per_frame_is_bounded" );
-                foreach ( var m in frame.Moved ) seen[(int)m[0]] = seen.GetValueOrDefault( (int)m[0] ) + 1;
+                foreach ( var m in frame.Moved )
+                {
+                    seen[(int)m[0]] = seen.GetValueOrDefault( (int)m[0] ) + 1;
+                    if ( round == 1 ) roundOne.Add( (int)m[0] );
+                    if ( round == 2 ) roundTwo.Add( (int)m[0] );
+                }
             }
         }
-        assert( seen.Count == 500 && seen.Values.Max() == 1, "play_sampler_500_moved_objects_are_round_robin_without_repeats: " + seen.Count + "/" + ( seen.Count == 0 ? 0 : seen.Values.Max() ) );
+        // Every object moves in every round, so the 500 do not fit in one frame; the 200 sent last time are the youngest and wait their turn.
+        // Rounds 1 and 2 therefore send 400 DIFFERENT objects, and round 3 reaches the last 100 before it repeats any.
+        assert( seen.Count == 500, "play_sampler_500_moved_objects_are_all_reached_within_three_frames: " + seen.Count );
+        assert( roundOne.Count == 200 && roundTwo.Count == 200 && !roundOne.Overlaps( roundTwo ), "play_sampler_round_robin_sends_different_objects_each_frame" );
+        sampler = new PlaySampler();
+        sampler.Sample( Scene( 500 ), 0 );
+        sampler.Sample( Scene( 500, i => i + 10 ), 50 );
+        sampler.Sample( Scene( 500, i => i + 10 ), 100 );
+        sampler.Sample( Scene( 500, i => i + 10 ), 150 );
         assert( sampler.Sample( Scene( 500, i => i + 10 ), 200 ).Sum( f => f.Moved.Count ) == 0, "play_sampler_nothing_is_resent_once_everything_arrived" );
 
         // A frame never exceeds the size bound: a flood of large created objects spills into following frames, created before moved.
