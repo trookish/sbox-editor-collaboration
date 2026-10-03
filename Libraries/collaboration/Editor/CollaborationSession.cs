@@ -178,6 +178,9 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
     private bool soloHarness;
 
     private readonly HeldPacketBuffer heldPackets = new HeldPacketBuffer();
+
+    // Shared play (Core/PlayRoster.cs and friends): null unless this computer opted in and the host advertised it.
+    private SharedPlayClient play;
     // Scenes whose host updates were discarded (play-mode buffer overflow) or could not be routed (the scene is playing): each is
     // resynchronized from the host once it can take a snapshot again.
     private readonly HashSet<string> resyncWhenRoutable = new HashSet<string>(StringComparer.Ordinal);
@@ -538,6 +541,10 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
     {
         get
         {
+            if (PausedForPlay && play?.EditsPausedNotice != null)
+            {
+                return play.EditsPausedNotice;
+            }
             if (!PausedForPlay)
             {
                 return null;
@@ -1128,6 +1135,7 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
             {
                 SessionServer result = new SessionServer(plan.Address, num2, project, baseline, plan.Token, text, null, (Packet hello) => SoloMayVouch(hello) ? Task.FromResult(SteamTokenVerdict.Verified) : new SteamTokenHttpVerifier(SandboxHttpTokenTransport.Default).VerifyAsync(hello, hostVerificationLifetime.Token), plan.SessionKey);
                 result.FileProjectRoot = Project.Current.RootDirectory.FullName;
+                result.SharedPlayEnabled = SharedPlayPreference.Enabled;
                 result.HostEngineBaseline = SceneAdapter.EngineBaseline();
                 result.FileChanged = RefreshAsset;
                 boundPort = num2;
@@ -2045,6 +2053,8 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
         server = null;
         projectFiles?.Dispose();
         projectFiles = null;
+        play?.Dispose();
+        play = null;
         Connected = false;
         try
         {
@@ -2272,7 +2282,7 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                 bool flag = PlayModeSourceCoexistence.CanProcessSourcePackets(sceneEditorSession?.IsPlaying ?? false, sceneEditorSession, sourceScenePath, RuntimeLifecycle, CurrentRuntimeFor(sceneEditorSession));
                 // Playing, or having no scene open, only pauses source synchronization (PlaySpectateRules): the connection completes,
                 // presence flows and scene packets are held until play stops. Only a runtime a hotload interrupted still refuses.
-                PlaySpectateDecision promoteDecision = PlaySpectateRules.Decide(IsLocalPlaying(sceneEditorSession), RuntimeLifecycle.State, flag, PlayModeSourceCoexistence.IsUsablePathKey(sourceScenePath));
+                PlaySpectateDecision promoteDecision = PlaySpectateRules.Decide(IsLocalPlaying(sceneEditorSession), RuntimeLifecycle.State, flag, PlayModeSourceCoexistence.IsUsablePathKey(sourceScenePath), play?.SpectatingRun ?? false);
                 if (!ContentFailureRules.MayPromoteConnection(promoteDecision, lifecycle.CanPromoteConnection))
                 {
                     BeginConnectionTeardown(recoverWhenComplete: false);
@@ -2316,7 +2326,7 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
             SceneEditorSession sceneEditorSession2 = AuthoringSource();
             string sourceScenePath2 = SceneAdapter.PathOf(sceneEditorSession2);
             bool sourceAdmissible = PlayModeSourceCoexistence.CanProcessSourcePackets(sceneEditorSession2?.IsPlaying ?? false, sceneEditorSession2, sourceScenePath2, RuntimeLifecycle, CurrentRuntimeFor(sceneEditorSession2));
-            PlaySpectateDecision decision = PlaySpectateRules.Decide(IsLocalPlaying(sceneEditorSession2), RuntimeLifecycle.State, sourceAdmissible, PlayModeSourceCoexistence.IsUsablePathKey(sourceScenePath2));
+            PlaySpectateDecision decision = PlaySpectateRules.Decide(IsLocalPlaying(sceneEditorSession2), RuntimeLifecycle.State, sourceAdmissible, PlayModeSourceCoexistence.IsUsablePathKey(sourceScenePath2), play?.SpectatingRun ?? false);
             if (decision != PlayDecision && decision == PlaySpectateDecision.Normal && !heldPackets.IsEmpty)
             {
                 Status = "Connected • applying changes made while you were playing";
@@ -2382,6 +2392,7 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
             {
                 return;
             }
+            play?.Tick();
             if (DateTime.UtcNow >= nextPresence)
             {
                 // Polled every SendCadence.PresenceMinimum (33 ms), but only SENT when something changed or a refresh is due (SendCadence): the
@@ -3326,6 +3337,10 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
         {
             return;
         }
+        if (play != null && play.Handle(p))
+        {
+            return;
+        }
         if (p.Kind == "welcome")
         {
             if (restoring && hostSession != null && hostSession != p.Session)
@@ -3342,6 +3357,11 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                 projectFiles = new FileSyncClient( Project.Current.RootDirectory.FullName ) { FileChanged = RefreshAsset };
                 projectFiles.Begin( packet => wire.Send( packet ) );
             }
+            // Shared play is opt-in on both sides: this computer chose it, and the host says it relays it. Otherwise nothing of it exists here.
+            play?.Dispose();
+            play = SharedPlayPreference.Enabled && p.Features != null && p.Features.Contains(PlayRelayPolicy.Feature)
+                ? new SharedPlayClient(packet => wire.Send(packet), Peer, SetActionNotice)
+                : null;
             Connected = true;
             Status = "Connected • live";
             reconnectRecovery = false;
