@@ -210,6 +210,14 @@ public sealed class Packet
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public JsonObject Play { get; set; }
+
+    /// <summary>
+    /// Live drag (<see cref="TransientCodec"/>): on a <c>transient</c> packet, one <c>[id, px, py, pz, qx, qy, qz, qw, sx, sy, sz]</c> entry per object
+    /// being dragged, at most <see cref="TransientLimits.MaxItems"/>. Never journaled and never part of scene state. Additive: omitted from the wire
+    /// when unset, and sent only to a host that advertises <see cref="TransientLimits.Feature"/>.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public JsonArray Transient { get; set; }
 }
 
 public static class Protocol

@@ -29,7 +29,7 @@ public enum SessionState
     Recovering
 }
 
-public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.IEventListener
+public sealed partial class CollaborationSession : EditorEvent.ISceneView, EditorEvent.IEventListener
 {
     private sealed class Tracked
     {
@@ -370,6 +370,8 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
         PreviousSessionChanges = SessionChangeLog.ReadPreviousCount(SceneAdapter.Root);
         Changes = new SessionChangeLog();
         Changes.RequestWrite();
+    }
+
     // The person's "Allow peers whose Steam identity could not be verified" choice for the session being joined; decides whether code from an unverified host may be received.
     private bool guestAllowUnverified;
 
@@ -1180,6 +1182,7 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
         reconnectRetrySpent = false;
         scenes.Clear();
         Roster.Clear();
+        ClearDrag();
         seen.Clear();
         sentSettings.Clear();
         lastRevision = 0;
@@ -2015,6 +2018,7 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
         }
         Connected = false;
         Roster.Clear();
+        ClearDrag();
         foreach (Tracked value in scenes.Values)
         {
             value.Ready = false;
@@ -2306,6 +2310,7 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
     public void Frame()
     {
         if (Project.Current != null) Changes.Flush(SceneAdapter.Root, false);
+        DrawRemoteDrags();
         if (focusNoticeExpires != default(DateTime) && DateTime.UtcNow >= focusNoticeExpires)
         {
             FocusNotice = null;
@@ -2527,6 +2532,7 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                 // fast floor exists so remote markers can be drawn from interpolated samples, and an idle session still sends almost nothing.
                 nextPresence = DateTime.UtcNow.AddMilliseconds(SendCadence.PresenceMinimum.TotalMilliseconds);
                 SendPresence(force: false);
+                TickDragSend();
                 if (SendCadence.ShouldSendPing(DateTime.UtcNow - lastPingSent))
                 {
                     lastPingSent = DateTime.UtcNow;
@@ -2688,6 +2694,7 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                             "). Your changes to this scene are kept locally. Reopen the scene to try again.");
                         continue;
                     }
+                    MaskTransientEcho(text, value, dictionary);
                     if (settingsChange != null)
                     {
                         SendSettings(text, value, settingsChange);
@@ -2705,6 +2712,7 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                     }
                     // Sibling order is part of each object's state (SiblingOrder.Key), so a reorder is an ordinary change below.
                     List<Change> list = StateRules.Diff(value.Known, dictionary);
+                    NoteLocalDrag(text, list);
                     if (list.Count > 0)
                     {
                         lastLocalEdit = DateTime.UtcNow;
@@ -3477,6 +3485,8 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                 return;
             }
             hostSession = p.Session;
+            hostTakesTransients = p.Features != null && p.Features.Contains(TransientLimits.Feature);
+            ClearDrag();
             projectFiles?.Dispose();
             projectFiles = null;
             // Geometry is replaced by placeholders only for a host that advertises the channel that carries it; an older host would take the
@@ -3615,6 +3625,10 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                 Roster[p.Peer] = p;
                 FeedPeerSmoothing(p);
             }
+        }
+        else if (p.Kind == TransientLimits.Kind)
+        {
+            ReceiveTransient(p);
         }
         else if (p.Kind == "left")
         {
@@ -3874,6 +3888,7 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                 {
                     bool flag = tracked2.Session.Scene.IsValid() && SceneEditorSession.All.Contains(tracked2.Session);
                     Dictionary<string, ObjectState> dictionary2 = (flag ? CaptureShown(p.Scene, tracked2) : new Dictionary<string, ObjectState>(tracked2.Known));
+                    NoteAcceptedForDrag(p, tracked2, dictionary2);
                     // What the editor showed and what was confirmed before this change, to put both back if the engine refuses it.
                     Dictionary<string, ObjectState> shownBefore = new Dictionary<string, ObjectState>(dictionary2);
                     Dictionary<string, ObjectState> knownPrior = new Dictionary<string, ObjectState>(StringComparer.Ordinal);
