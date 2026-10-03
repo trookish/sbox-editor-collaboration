@@ -203,6 +203,13 @@ public sealed class Packet
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public double SentMs { get; set; }
+
+    /// <summary>
+    /// Shared play (<see cref="PlayFrame"/>): on a <c>play-frame</c>, the frame; on <c>play-start</c> and <c>play-stop</c>, unused. Additive: omitted
+    /// from the wire when unset, and only ever sent to a peer that opted in with <c>play-optin</c>, so an older peer never sees it.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public JsonObject Play { get; set; }
 }
 
 public static class Protocol

@@ -244,6 +244,7 @@ public sealed partial class SessionServer : IDisposable
                     }
                     p.Peer = m.Peer;
                     if (HandleFilePacket(m, p)) continue;
+                    if (HandlePlayPacket(m, p)) continue;
                     switch (p.Kind)
                     {
                     case "subscribe":
@@ -628,11 +629,17 @@ public sealed partial class SessionServer : IDisposable
     // Features are advertised only when this host can actually serve them: without a project root there are no files to offer.
     private Packet Welcome()
     {
+        // File and geometry features come from WelcomeFeatures (SessionServer.Blobs.cs).
+        var features = WelcomeFeatures() ?? new List<string>();
+        if (SharedPlayEnabled)
+        {
+            features.Add(PlayRelayPolicy.Feature);
+        }
         return new Packet
         {
             Kind = "welcome",
             Session = sessionId,
-            Features = WelcomeFeatures()
+            Features = features.Count == 0 ? null : features
         };
     }
 
@@ -647,6 +654,7 @@ public sealed partial class SessionServer : IDisposable
         {
             ForgetFileMember(member);
             ForgetBlobMember(member);
+            ForgetPlayMember(member);
             member.Wire.Dispose();
             if (member.Peer != null)
             {

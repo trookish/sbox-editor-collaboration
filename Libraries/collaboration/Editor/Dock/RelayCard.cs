@@ -18,6 +18,8 @@ public sealed class RelayCard : DockCard
 
     private readonly Checkbox enabled;
 
+    private readonly Checkbox sharedPlay;
+
     private readonly Label notice;
 
     private readonly Button advanced;
@@ -34,7 +36,7 @@ public sealed class RelayCard : DockCard
 
     private bool lastProblem;
 
-    protected override bool FieldsAssigned => enabled != null && notice != null && advanced != null && open != null && setup != null && cancel != null;
+    protected override bool FieldsAssigned => enabled != null && sharedPlay != null && notice != null && advanced != null && open != null && setup != null && cancel != null;
 
     public RelayCard(Widget parent)
         : base(parent, "Relay")
@@ -43,6 +45,10 @@ public sealed class RelayCard : DockCard
         enabled.Value = RelaySetup.InternetRelayEnabled;
         enabled.ToolTip = "On by default. When on, hosting opens a public relay address so friends on other networks can join with the invite code. Turn it off to host for your network only. A change takes effect the next time you host.";
         enabled.Toggled = () => DockCard.Run(() => RelaySetup.InternetRelayEnabled = enabled.Value);
+        sharedPlay = Layout.Add(new Checkbox("Shared play mode (experimental)", this));
+        sharedPlay.Value = SharedPlayPreference.Enabled;
+        sharedPlay.ToolTip = "Off by default. When on, one person's Play is shown to the others as a spectator window they can fly around in. Spectators see a copy of the scene drawn from positions and visual components only; no game code runs on their computer, and the game's own networking is not touched. It applies to the next session you host or join, and the host and the others must each turn it on.";
+        sharedPlay.Toggled = () => DockCard.Run(() => SharedPlayPreference.Enabled = sharedPlay.Value);
         notice = Layout.Add(new Label("", this)
         {
             WordWrap = true,
@@ -76,6 +82,10 @@ public sealed class RelayCard : DockCard
         if (enabled.Value != RelaySetup.InternetRelayEnabled)
         {
             enabled.Value = RelaySetup.InternetRelayEnabled;
+        }
+        if (sharedPlay.Value != SharedPlayPreference.Enabled)
+        {
+            sharedPlay.Value = SharedPlayPreference.Enabled;
         }
         RelaySetupView view = RelaySetup.Describe(current.ConfiguredRelayUrl);
         // Missing is the default: no relay of one's own. Its own sentence describes the Cloudflare login steps, so the card says what actually happens
