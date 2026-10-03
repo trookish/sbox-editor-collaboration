@@ -321,6 +321,50 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
 
     public string Status { get; private set; } = "Offline";
 
+    // Project file synchronization (FileSyncClient): created at welcome when the host advertises it, polled from Tick, fed from Receive.
+    // Its progress is shown through Status (the dock's session line) and its notices through SetActionNotice and the log, the two ways
+    // this session already reports to the person.
+    private FileSyncClient projectFiles;
+
+    private string lastHostFileNotice;
+
+    // Scene files open in this editor are owned by the live scene sync, so file sync neither fetches nor sends them. PathOf is lowercase
+    // and relative to Assets; the comparison in FileSyncClient is case-insensitive.
+    private static string[] OpenFileScenes() => SceneEditorSession.All.Where( x => !(x is GameEditorSession) && !x.IsPrefabSession ).Select( x => SceneAdapter.PathOf( x ) ).Where( x => x != null ).Select( x => "Assets/" + x ).ToArray();
+
+    // Makes the editor notice a file synchronization wrote or replaced: AssetSystem.FindByPath / RegisterFile ("If you just created an asset,
+    // you probably want to immediately register it", Sandbox.Tools.xml) and Asset.Compile(false), the call the editor's own MCP
+    // AssetSystem.cs makes after writing a source file. A deleted file is left to the engine's own file watching.
+    private static void RefreshAsset( string relativePath )
+    {
+        try
+        {
+            string absolute = Path.Combine( Project.Current.RootDirectory.FullName, relativePath.Replace( '/', Path.DirectorySeparatorChar ) );
+            if ( !File.Exists( absolute ) ) return;
+            Asset asset = AssetSystem.FindByPath( absolute ) ?? AssetSystem.RegisterFile( absolute );
+            if ( asset != null && asset.CanRecompile ) asset.Compile( false );
+        }
+        catch ( Exception ex )
+        {
+            GlobalGameNamespace.Log.Warning( "Collaboration: the asset \"" + relativePath + "\" was received but the editor could not refresh it: " + ex.Message );
+        }
+    }
+
+    private void ShowFileNotices()
+    {
+        for ( string notice = projectFiles?.TakeNotice(); notice != null; notice = projectFiles.TakeNotice() )
+        {
+            GlobalGameNamespace.Log.Info( "Collaboration: " + notice );
+            SetActionNotice( notice );
+        }
+        string hostNotice = server?.FileNotice;
+        if ( hostNotice != null && !string.Equals( hostNotice, lastHostFileNotice, StringComparison.Ordinal ) )
+        {
+            lastHostFileNotice = hostNotice;
+            GlobalGameNamespace.Log.Info( "Collaboration: " + hostNotice );
+        }
+    }
+
     public string Error { get; private set; }
 
     public bool Connected { get; private set; }
@@ -1053,6 +1097,9 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
             try
             {
                 SessionServer result = new SessionServer(plan.Address, num2, project, baseline, plan.Token, text, null, (Packet hello) => SoloMayVouch(hello) ? Task.FromResult(SteamTokenVerdict.Verified) : new SteamTokenHttpVerifier(SandboxHttpTokenTransport.Default).VerifyAsync(hello, hostVerificationLifetime.Token), plan.SessionKey);
+                result.FileProjectRoot = Project.Current.RootDirectory.FullName;
+                result.HostEngineBaseline = SceneAdapter.EngineBaseline();
+                result.FileChanged = RefreshAsset;
                 boundPort = num2;
                 return result;
             }
@@ -1785,6 +1832,8 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
         ResourceDisposalResult resourceDisposalResult = ResourceDisposalRules.DisposePair(wire, "collaboration transport", server, "collaboration host server");
         wire = null;
         server = null;
+        projectFiles?.Dispose();
+        projectFiles = null;
         Connected = false;
         try
         {
@@ -2039,7 +2088,8 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                     SteamToken = steamTokenValue,
                     OrgIdent = orgIdentValue,
                     LibraryVersion = libraryVersionValue,
-                    ProjectManifest = projectManifestValue
+                    ProjectManifest = projectManifestValue,
+                    EngineBaseline = SceneAdapter.EngineBaseline()
                 });
                 lastReceive = DateTime.UtcNow;
             }
@@ -2138,6 +2188,18 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                     wire.Send(ping);
                     ShowDriftNoticeOnce();
                 }
+            }
+            if (projectFiles != null)
+            {
+                projectFiles.Poll( p => wire.Send( p ), OpenFileScenes() );
+                ShowFileNotices();
+                if (!projectFiles.JoinReady)
+                {
+                    // Scenes are subscribed only once the files they reference have arrived (the scan below subscribes them).
+                    Status = projectFiles.Progress;
+                    return;
+                }
+                if (Status.StartsWith( "Receiving project files:", StringComparison.Ordinal )) Status = "Connected • live";
             }
             if (Error != null || DateTime.UtcNow < nextScan)
             {
@@ -3049,6 +3111,10 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
 
     private void Receive(Packet p)
     {
+        if (projectFiles != null && projectFiles.Handle( p, packet => wire.Send( packet ), OpenFileScenes() ))
+        {
+            return;
+        }
         if (p.Kind == "welcome")
         {
             if (restoring && hostSession != null && hostSession != p.Session)
@@ -3057,6 +3123,14 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                 return;
             }
             hostSession = p.Session;
+            projectFiles?.Dispose();
+            projectFiles = null;
+            // Only a host that advertises file synchronization is asked for its index; an older host gets the session as before.
+            if (p.Features != null && p.Features.Contains( FileSyncLimits.Feature ))
+            {
+                projectFiles = new FileSyncClient( Project.Current.RootDirectory.FullName ) { FileChanged = RefreshAsset };
+                projectFiles.Begin( packet => wire.Send( packet ) );
+            }
             Connected = true;
             Status = "Connected • live";
             reconnectRecovery = false;

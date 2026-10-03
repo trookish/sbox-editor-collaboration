@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace TeamCreate;
@@ -50,14 +52,46 @@ public static class AdmissionRules
                 return text2 + $"runs collaboration library {((text4.Length == 0) ? "an unknown version" : text4)}; this session requires {version}. Update the library and reconnect.";
             }
         }
-        if (!string.IsNullOrWhiteSpace(hostManifest) && !string.Equals(facts.PeerProjectManifest, hostManifest, StringComparison.Ordinal))
-        {
-            string text5 = SafePeerText(facts.PeerProjectManifest, 64);
-            string value = ((text5.Length == 0) ? "unknown" : text5);
-            failedGate = "manifest";
-            return text2 + $"has a different copy of this project ({value} vs {hostManifest}). Sync the project (Git and Asset Party) before joining.";
-        }
+        // File differences are reconciled after admission: assets are synchronized and code differences are reported, never received.
+        // The manifest therefore stops being a gate; the engine build still is (BaselineRefusal).
         return null;
+    }
+
+    public const string BaselineRefusalMessage = "Project/scene baseline differs (engine, source, assets or metadata). Sync copies in Git before joining.";
+
+    public const string EngineRefusalMessage = "This peer runs a different s&box engine build from the host's. Update s&box to the same version on both computers and reconnect.";
+
+    public const string EngineUnknownRefusalMessage = "This peer's project differs from the host's and its collaboration library cannot synchronize project files. Update the library and reconnect.";
+
+    /// <summary>
+    /// The baseline gate of the hello. When the peer's files match the host's (or the host has no manifest to compare), the full baseline
+    /// must be one the host accepts, exactly as before file synchronization. When the files differ, the full baseline necessarily differs
+    /// too (it hashes every file), so only the engine fingerprint is compared: the files are reconciled after admission, the engine build
+    /// cannot be. A peer that sends no engine fingerprint predates file synchronization and is refused, because nothing would reconcile its
+    /// files; a host that has no fingerprint of its own falls back to the full baseline. Null when the peer passes.
+    /// </summary>
+    public static string BaselineRefusal(string peerManifest, string hostManifest, string peerBaseline, ICollection<string> compatibleBaselines, string peerEngine, string hostEngine)
+    {
+        bool sameFiles = string.IsNullOrWhiteSpace(hostManifest) || string.Equals(peerManifest, hostManifest, StringComparison.Ordinal);
+        if (sameFiles || string.IsNullOrWhiteSpace(hostEngine))
+        {
+            return (compatibleBaselines != null && peerBaseline != null && compatibleBaselines.Contains(peerBaseline)) ? null : BaselineRefusalMessage;
+        }
+        if (string.IsNullOrWhiteSpace(peerEngine))
+        {
+            return EngineUnknownRefusalMessage;
+        }
+        return string.Equals(peerEngine, hostEngine, StringComparison.Ordinal) ? null : EngineRefusalMessage;
+    }
+
+    /// <summary>
+    /// A fingerprint of the engine build from the module version ids of the engine assemblies (the same ids SceneAdapter.Baseline starts
+    /// with), in the order given. Lowercase SHA-256 hex.
+    /// </summary>
+    public static string EngineFingerprint(IEnumerable<string> moduleVersionIds)
+    {
+        string text = "teamcreate-engine-1\n" + string.Join("\n", moduleVersionIds ?? Array.Empty<string>());
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text))).ToLowerInvariant();
     }
 
     private static Version ParseVersion(string value)

@@ -17,6 +17,51 @@ public sealed record Change(string Id, ObjectState Before, ObjectState After);
 /// </summary>
 public sealed class Packet
 {
+    // Project file synchronization (FileSync*.cs). Every member is additive and omitted from the wire when unset, so presence and edits
+    // stay as small as before and peers that predate file sync ignore them.
+
+    /// <summary>A project-relative file path with "/" separators. Untrusted: the receiver validates it with FilePathRules before any disk access.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string Path { get; set; }
+
+    /// <summary>SHA-256 (lowercase hex) of the file as ProjectManifest hashes it (a .meta file through MetaFileRules.Canonical).</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string Sha256 { get; set; }
+
+    /// <summary>On file-put and file-delete: the version the sender last agreed with the session, null for a file it believes is new.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string BaseSha256 { get; set; }
+
+    /// <summary>Byte offset of a file-chunk (or of the chunk a file-ack acknowledges).</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public long Offset { get; set; }
+
+    /// <summary>The whole file's size in bytes on file-chunk, file-put and file-changed.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public long Total { get; set; }
+
+    /// <summary>One chunk of file content (base64 on the wire, at most FileSyncLimits.ChunkSize bytes before encoding).</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public byte[] Data { get; set; }
+
+    /// <summary>One page of the host's file index on a files-index reply; Final marks the last page.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<FileIndexEntry> FileEntries { get; set; }
+
+    /// <summary>
+    /// What the host supports, sent on welcome. A guest starts file synchronization only when it holds FileSyncLimits.Feature: a newer
+    /// guest is admitted by an older host, which would answer an unknown message kind with a fatal error.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<string> Features { get; set; }
+
+    /// <summary>
+    /// On hello: the fingerprint of the engine build alone (AdmissionRules.EngineFingerprint). The full Baseline also covers every project
+    /// file, so it necessarily differs for a guest whose files are about to be synchronized; this keeps the engine check for that guest.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string EngineBaseline { get; set; }
+
     public string Kind { get; set; }
 
     public string Id { get; set; } = Guid.NewGuid().ToString();
