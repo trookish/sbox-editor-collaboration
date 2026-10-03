@@ -26,6 +26,9 @@ public sealed class MirrorComponent
     public bool Enabled = true;
 
     public JsonObject Props = new JsonObject();
+
+    /// <summary>Incremented whenever the type, enabled flag or properties change, so a view re-applies a component only when it must.</summary>
+    public int Revision = 1;
 }
 
 public sealed class MirrorObject
@@ -205,6 +208,7 @@ public sealed class PlayMirror
             component = new MirrorComponent { Guid = guid, Type = type };
             o.Components[guid] = component;
         }
+        component.Revision++;
         if ( entry["a"] is JsonValue a && a.TryGetValue( out bool enabled ) ) component.Enabled = enabled;
         if ( entry["p"] is JsonObject props )
         {

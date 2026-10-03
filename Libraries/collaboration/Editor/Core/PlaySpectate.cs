@@ -29,11 +29,17 @@ public static class PlaySpectateRules
     /// in the loop, and a collaborator could not watch. The one state that still stops everything is a hotload that
     /// interrupted play, because that path archives recovery data and must be ended with Leave.
     /// </summary>
-    public static PlaySpectateDecision Decide(bool localPlaying, PlayModeLifecycleState lifecycle, bool sourcePacketsAdmissible, bool hasSupportedScene)
+    public static PlaySpectateDecision Decide(bool localPlaying, PlayModeLifecycleState lifecycle, bool sourcePacketsAdmissible, bool hasSupportedScene, bool spectatingRemoteRun = false)
     {
         if (lifecycle == PlayModeLifecycleState.RuntimeBlocked)
         {
             return PlaySpectateDecision.FailStop;
+        }
+        if (spectatingRemoteRun && !localPlaying)
+        {
+            // Shared play: somebody else's run is on this screen. Nobody's edit-scene changes sync meanwhile (they would not reach the player), so
+            // this editor pauses exactly as it does for its own play, and holds what arrives until the run ends.
+            return PlaySpectateDecision.PausedForPlay;
         }
         if (localPlaying)
         {

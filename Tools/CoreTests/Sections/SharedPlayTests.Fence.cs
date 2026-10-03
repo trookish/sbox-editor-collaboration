@@ -21,6 +21,12 @@ static partial class SharedPlayTests
         assert( !SharedPlaySetting.Parse( "yes please\n", out string e5 ) && e5 != null && e5.Contains( SharedPlaySetting.FileName ), "play_setting_unknown_value_stays_off_and_says_why" );
         assert( SharedPlaySetting.Parse( "ON\r\n", out _ ), "play_setting_is_case_insensitive_and_reads_crlf" );
 
+        // Spectating pauses source sync like playing does, and changes nothing when there is no remote run.
+        assert( PlaySpectateRules.Decide( false, PlayModeLifecycleState.Source, true, true ) == PlaySpectateDecision.Normal, "play_decide_default_is_unchanged" );
+        assert( PlaySpectateRules.Decide( false, PlayModeLifecycleState.Source, true, true, spectatingRemoteRun: true ) == PlaySpectateDecision.PausedForPlay, "play_decide_spectating_a_remote_run_pauses_source_sync" );
+        assert( PlaySpectateRules.Decide( false, PlayModeLifecycleState.RuntimeBlocked, true, true, spectatingRemoteRun: true ) == PlaySpectateDecision.FailStop, "play_decide_a_hotload_interrupted_runtime_still_fails_stop" );
+        assert( PlaySpectateRules.Decide( true, PlayModeLifecycleState.Source, false, true, spectatingRemoteRun: true ) == PlaySpectateRules.Decide( true, PlayModeLifecycleState.Source, false, true ), "play_decide_a_local_run_keeps_its_own_rules" );
+
         // The source fence. Two rules over the library's own source text:
         //  (1) no file of the library names the game's networking API at all (the library must not change a project's networking mode, open a
         //      lobby for itself, make a spectator join one, or spawn a player), and
