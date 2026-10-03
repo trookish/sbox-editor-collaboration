@@ -98,6 +98,7 @@ public sealed partial class SessionServer
     {
         List<string> features = new List<string>();
         if ( !string.IsNullOrEmpty( FileProjectRoot ) ) features.Add( FileSyncLimits.Feature );
+        if ( !string.IsNullOrEmpty( FileProjectRoot ) ) features.Add( CodeTransferLimits.Feature );
         if ( BlobStore != null ) features.Add( BlobLimits.Feature );
         return features.Count == 0 ? null : features;
     }

@@ -33,7 +33,24 @@ public static class FileSyncLimits
     public const int IndexPage = 256;
 }
 
-public sealed record FileIndexEntry( string Path, string Sha256, long Size );
+/// <summary>Whether a file travels on the automatic asset path or only after the person's consent (code, which runs on the receiver's machine).</summary>
+public enum FileTransferKind
+{
+    Asset,
+
+    Code,
+}
+
+/// <summary>
+/// One entry of a file index. <see cref="Kind"/> is how a receiver files an entry it has queued (the same assembler, window, hash check, backup and
+/// atomic write serve both kinds); it is not read from the wire as a decision: a receiver classifies the path itself, and the host decides
+/// from the path alone whether a request needs consent.
+/// </summary>
+public sealed record FileIndexEntry( string Path, string Sha256, long Size )
+{
+    [System.Text.Json.Serialization.JsonIgnore]
+    public FileTransferKind Kind { get; init; }
+}
 
 /// <summary>
 /// Builds the file index: one entry for every path ProjectManifest.EnumerateInputs yields, hashed exactly as ProjectManifest hashes it
@@ -227,12 +244,14 @@ public sealed class FileChunkAssembler : IDisposable
 
     private readonly HashSet<long> received = new();
 
-    public FileChunkAssembler( string root, string path, string hash, long total, string partSuffix = null )
+    public FileChunkAssembler( string root, string path, string hash, long total, string partSuffix = null, FileTransferKind kind = FileTransferKind.Asset )
     {
-        if ( !FileSyncReceiver.ValidPath( root, path, out _, out string error ) ) throw new InvalidOperationException( error );
+        if ( !FileSyncReceiver.ValidPath( root, path, kind, out _, out string error ) ) throw new InvalidOperationException( error );
+        if ( kind == FileTransferKind.Code && ( total < 0 || total > CodeTransferLimits.MaxFileBytes ) ) throw new InvalidOperationException( $"The code file \"{FileJoinPlan.Bounded( path )}\" is larger than 4 MiB and is not received." );
         if ( total < 0 || total > FileSyncLimits.MaxFileSize ) throw new InvalidOperationException( FileJoinPlan.TooLarge( path ) );
         if ( !FileSyncReceiver.ValidHash( hash ) ) throw new InvalidOperationException( $"The file \"{FileJoinPlan.Bounded( path )}\" was offered without a valid SHA-256 digest." );
         Path = path;
+        Kind = kind;
         Sha256 = hash.ToLowerInvariant();
         Total = total;
         string incoming = System.IO.Path.Combine( root, ".collaboration", "incoming" );
@@ -243,6 +262,8 @@ public sealed class FileChunkAssembler : IDisposable
     }
 
     public string Path { get; }
+
+    public FileTransferKind Kind { get; }
 
     public string Sha256 { get; }
 
@@ -286,7 +307,7 @@ public sealed class FileChunkAssembler : IDisposable
     {
         recovery = null;
         if ( !IsComplete ) return $"The file \"{FileJoinPlan.Bounded( Path )}\" is incomplete.";
-        return receiver.AcceptStaged( Path, Sha256, part, out recovery );
+        return receiver.AcceptStaged( Path, Sha256, part, out recovery, Kind );
     }
 
     public void Dispose()
@@ -329,11 +350,36 @@ public sealed class FileSyncReceiver
 
     public static bool ValidPath( string root, string path, out string target, out string error )
     {
+        return ValidPath( root, path, FileTransferKind.Asset, out target, out error );
+    }
+
+    /// <summary>
+    /// The path rules for one kind. An asset path is refused when it classifies as code (the automatic path never writes code). A code path
+    /// must be transferable code (<see cref="CodeTransferRules"/>): Libraries, Git, the library's own folder and build output are refused here
+    /// as well, so even a consented request cannot reach them, and it is resolved through the same traversal, drive, device-name and junction checks.
+    /// </summary>
+    public static bool ValidPath( string root, string path, FileTransferKind kind, out string target, out string error )
+    {
         target = null;
+        if ( kind == FileTransferKind.Code )
+        {
+            if ( !CodeTransferRules.IsTransferable( path ) )
+            {
+                error = $"The file \"{FileJoinPlan.Bounded( path )}\" is not code this library transfers (installed libraries, Git, build output and the project file are never transferred) and was refused.";
+                return false;
+            }
+            if ( !FilePathRules.TryResolveUnderCode( root, path, out target, out error ) )
+            {
+                error = $"The code file path \"{FileJoinPlan.Bounded( path )}\" was refused: {error}";
+                target = null;
+                return false;
+            }
+            return true;
+        }
         // Classified first, so code is refused with the sentence that says why (FilePathRules would refuse it only as "not under Assets").
         if ( !string.IsNullOrWhiteSpace( path ) && JoinReadiness.Classify( path ) != ProjectFileKind.Asset )
         {
-            error = $"The file \"{FileJoinPlan.Bounded( path )}\" is code or project configuration and is never transferred. Update it through Git.";
+            error = $"The file \"{FileJoinPlan.Bounded( path )}\" is code or project configuration and is not synchronized automatically. Code is received only after you agree to it on the Code card.";
             return false;
         }
         if ( !FilePathRules.TryNormalize( path, out string normalized, out error ) )
@@ -375,19 +421,21 @@ public sealed class FileSyncReceiver
         }
     }
 
-    public string AcceptStaged( string path, string hash, string part, out string recovery )
+    public string AcceptStaged( string path, string hash, string part, out string recovery, FileTransferKind kind = FileTransferKind.Asset )
     {
         recovery = null;
-        if ( !ValidPath( root, path, out string target, out string error ) ) return error;
+        if ( !ValidPath( root, path, kind, out string target, out string error ) ) return error;
         if ( !ValidHash( hash ) ) return $"The file \"{path}\" was offered without a valid SHA-256 digest.";
         byte[] content = File.ReadAllBytes( part );
         if ( !string.Equals( FileSyncIndex.Hash( path, content ), hash, StringComparison.OrdinalIgnoreCase ) )
         {
             return $"The file \"{path}\" did not match its SHA-256 digest and was discarded.";
         }
+        // Checked after the digest, so a host that merely lied about the content is told apart from one whose code file is binary.
+        if ( kind == FileTransferKind.Code && CodeTransferRules.HasBinaryContent( content ) ) return BinaryRefusal( path );
         Directory.CreateDirectory( Path.GetDirectoryName( target )! );
         // Resolved again after creating the folders: a junction planted in the path in between is caught here, before any write.
-        if ( !ValidPath( root, path, out target, out error ) ) return error;
+        if ( !ValidPath( root, path, kind, out target, out error ) ) return error;
         if ( File.Exists( target ) )
         {
             if ( string.Equals( FileSyncIndex.Hash( path, File.ReadAllBytes( target ) ), hash, StringComparison.OrdinalIgnoreCase ) ) return null;
@@ -405,6 +453,12 @@ public sealed class FileSyncReceiver
             if ( File.Exists( temp ) ) File.Delete( temp );
         }
         return null;
+    }
+
+    /// <summary>The refusal of a code file that holds a NUL byte. A fixed sentence per path, so the client can tell it from a transient digest failure and not retry it.</summary>
+    public static string BinaryRefusal( string path )
+    {
+        return $"The file \"{FileJoinPlan.Bounded( path )}\" contains binary data (a NUL byte), which a code file must not, and was not applied.";
     }
 
     /// <summary>Backs up, then deletes. Null on success (also when the file is already gone), else the reason.</summary>

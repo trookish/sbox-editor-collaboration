@@ -31,7 +31,24 @@ public static class FilePathRules
     /// </summary>
     public static bool TryNormalize( string relativePath, out string normalized, out string error )
     {
-        string problem = Validate( relativePath );
+        return TryNormalize( relativePath, false, out normalized, out error );
+    }
+
+    /// <summary>The top-level folders a consented code transfer may write into (a script may also sit under Assets). Compared case-sensitively.</summary>
+    public static readonly string[] CodeRoots = { AllowedRoot, "Code", "Editor", "ProjectSettings" };
+
+    /// <summary>
+    /// The same rules for a path of a consented code transfer: every check is identical, but the first folder may be any of <see cref="CodeRoots"/>.
+    /// A root-level file (the project descriptor) is refused: it names the guest's own project and is never overwritten.
+    /// </summary>
+    public static bool TryNormalizeCode( string relativePath, out string normalized, out string error )
+    {
+        return TryNormalize( relativePath, true, out normalized, out error );
+    }
+
+    private static bool TryNormalize( string relativePath, bool code, out string normalized, out string error )
+    {
+        string problem = Validate( relativePath, code );
         if ( problem != null )
         {
             normalized = null;
@@ -52,13 +69,24 @@ public static class FilePathRules
     /// </summary>
     public static bool TryResolveUnder( string rootDirectory, string normalizedRelativePath, out string fullPath, out string error )
     {
+        return TryResolveUnder( rootDirectory, normalizedRelativePath, false, out fullPath, out error );
+    }
+
+    /// <summary>The resolution of <see cref="TryResolveUnder(string, string, out string, out string)"/> for a code path (see <see cref="TryNormalizeCode"/>).</summary>
+    public static bool TryResolveUnderCode( string rootDirectory, string normalizedRelativePath, out string fullPath, out string error )
+    {
+        return TryResolveUnder( rootDirectory, normalizedRelativePath, true, out fullPath, out error );
+    }
+
+    private static bool TryResolveUnder( string rootDirectory, string normalizedRelativePath, bool code, out string fullPath, out string error )
+    {
         fullPath = null;
         if ( string.IsNullOrWhiteSpace( rootDirectory ) )
         {
             error = "The project root directory is empty.";
             return false;
         }
-        if ( !TryNormalize( normalizedRelativePath, out string normalized, out error ) )
+        if ( !TryNormalize( normalizedRelativePath, code, out string normalized, out error ) )
         {
             return false;
         }
@@ -131,7 +159,7 @@ public static class FilePathRules
     }
 
     /// <summary>The first rule the path breaks as a sentence, or null when it breaks none.</summary>
-    private static string Validate( string path )
+    private static string Validate( string path, bool code )
     {
         if ( string.IsNullOrWhiteSpace( path ) )
         {
@@ -175,6 +203,14 @@ public static class FilePathRules
             {
                 return problem;
             }
+        }
+        if ( code )
+        {
+            if ( !Array.Exists( CodeRoots, x => string.Equals( x, segments[0], StringComparison.Ordinal ) ) )
+            {
+                return "The file path must start with the \"Code\", \"Editor\", \"ProjectSettings\" or \"Assets\" folder; no other folder may be written by a code transfer.";
+            }
+            return segments.Length < 2 ? "The file path must name a file inside a project folder." : null;
         }
         if ( !string.Equals( segments[0], AllowedRoot, StringComparison.Ordinal ) )
         {
