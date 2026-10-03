@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Text.Json.Nodes;
 
 namespace TeamCreate;
@@ -260,5 +261,58 @@ public static class TransientEcho
             }
         }
         return onto with { Data = data };
+    }
+
+    /// <summary>Reads an object's transform from its saved state (<c>Position</c> "x,y,z", <c>Rotation</c> "x,y,z,w", <c>Scale</c> "x,y,z"). False when a field is missing or malformed.</summary>
+    public static bool TryReadPose( ObjectState state, out Pose pose )
+    {
+        pose = default;
+        if ( state?.Data == null
+            || !Read( state.Data, "Position", 3, out float[] p )
+            || !Read( state.Data, "Rotation", 4, out float[] r )
+            || !Read( state.Data, "Scale", 3, out float[] s ) )
+        {
+            return false;
+        }
+        pose = new Pose( p[0], p[1], p[2], r[0], r[1], r[2], r[3], s[0], s[1], s[2] );
+        return true;
+    }
+
+    /// <summary>True when the two states differ in Position, Rotation or Scale (compared as text, the way the diff does).</summary>
+    public static bool TransformDiffers( ObjectState a, ObjectState b )
+    {
+        foreach ( string field in Fields )
+        {
+            string x = a?.Data?[field]?.ToString();
+            string y = b?.Data?[field]?.ToString();
+            if ( x != y )
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static bool Read( JsonObject data, string field, int count, out float[] values )
+    {
+        values = null;
+        if ( !data.TryGetPropertyValue( field, out JsonNode node ) || node is not JsonValue value || !value.TryGetValue( out string text ) )
+        {
+            return false;
+        }
+        string[] parts = text.Split( ',' );
+        if ( parts.Length != count )
+        {
+            return false;
+        }
+        values = new float[count];
+        for ( int i = 0; i < count; i++ )
+        {
+            if ( !float.TryParse( parts[i], NumberStyles.Float, CultureInfo.InvariantCulture, out values[i] ) || !float.IsFinite( values[i] ) )
+            {
+                return false;
+            }
+        }
+        return true;
     }
 }

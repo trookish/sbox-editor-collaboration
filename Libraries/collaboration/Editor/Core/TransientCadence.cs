@@ -113,6 +113,9 @@ public sealed class TransientCadence
         return id != null && states.TryGetValue( id, out State state ) && nowMs - state.ChangedAtMs < MovingQuietMs;
     }
 
+    /// <summary>The objects being watched.</summary>
+    public IEnumerable<string> Ids => states.Keys;
+
     public void Clear() => states.Clear();
 
     private static bool IsFinite( Pose p )

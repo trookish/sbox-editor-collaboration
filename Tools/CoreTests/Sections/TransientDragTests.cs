@@ -202,6 +202,10 @@ static class TransientDragTests
         assert( keepsName.Data["Name"].GetValue<string>() == "Renamed" && keepsName.Data["Position"].GetValue<string>() == "0,0,0", "drag_the_mask_covers_only_the_three_transform_fields" );
         assert( renamed.Data["Position"].GetValue<string>() == "12.5,3,0", "drag_the_mask_does_not_modify_its_input" );
         assert( ReferenceEquals( TransientEcho.CopyTransform( shown, null ), shown ), "drag_nothing_to_copy_from_leaves_the_state_alone" );
+        assert( TransientEcho.TryReadPose( shown, out var read ) && read.X == 12.5f && read.Y == 3f && read.Qw == 1f && read.Sx == 1f, "drag_a_pose_is_read_from_the_saved_state_strings" );
+        var broken = Cube( 1, "1,2" );
+        assert( !TransientEcho.TryReadPose( broken, out _ ) && !TransientEcho.TryReadPose( null, out _ ), "drag_a_malformed_or_missing_transform_is_not_read" );
+        assert( TransientEcho.TransformDiffers( known, shown ) && !TransientEcho.TransformDiffers( known, Cube( 1, "0,0,0", "Other" ) ), "drag_transform_difference_ignores_other_fields" );
     }
 
     // ---- The receiver -------------------------------------------------------------------------------------------------------------------
