@@ -83,4 +83,74 @@ public static class ContentFailureRules
         }
         return backupWritten ? DiskStampAction.KeepLiveScene : DiskStampAction.PauseScene;
     }
+
+    /// <summary>
+    /// What the session does with an exception thrown by something the person did (save, undo, redo, the play toggle, a dock button).
+    /// Almost all of these are about one action: a full disk, a scene the engine would not save, an undo with nothing to undo. They are
+    /// reported and the session continues, because ending a collaboration over them throws away a working connection. Only the
+    /// integrity failures docs/FAILURE-MODES.md keeps fail-closed still end it: a frame that does not authenticate or a peer that cannot be
+    /// authenticated (<see cref="System.Security.Cryptography.CryptographicException"/>, <see cref="System.Security.Authentication.AuthenticationException"/>),
+    /// a relay that refused the route (<see cref="RelayRefusedException"/>), and an editor out of memory. A wrapper (an aggregate, a reflection
+    /// invocation, or any exception with an inner one) is judged by what it wraps, to a bounded depth.
+    /// </summary>
+    public static ActionFailureAction ClassifyActionFailure( Exception error )
+    {
+        return IsIntegrityFailure( error, 0 ) ? ActionFailureAction.Fail : ActionFailureAction.Notice;
+    }
+
+    private const int MaxWrapperDepth = 8;
+
+    private static bool IsIntegrityFailure( Exception error, int depth )
+    {
+        if ( error == null || depth > MaxWrapperDepth )
+        {
+            return false;
+        }
+        if ( error is System.Security.Cryptography.CryptographicException || error is System.Security.Authentication.AuthenticationException
+            || error is RelayRefusedException || error is OutOfMemoryException )
+        {
+            return true;
+        }
+        if ( error is AggregateException aggregate )
+        {
+            foreach ( Exception inner in aggregate.InnerExceptions )
+            {
+                if ( IsIntegrityFailure( inner, depth + 1 ) )
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+        return IsIntegrityFailure( error.InnerException, depth + 1 );
+    }
+
+    /// <summary>
+    /// The notice for an action that failed without ending the session: <c>The action could not be completed: &lt;reason&gt;. The session continues.</c>
+    /// The reason is the first line of the message, bounded (<see cref="ApplyRecovery.ShortReason"/>), so a stack trace or an engine dump never
+    /// reaches the dock. An <see cref="ActionRefusal"/> is already a sentence written for the person and is shown as it is.
+    /// </summary>
+    public static string ActionFailureNotice( Exception error )
+    {
+        if ( error is ActionRefusal && !string.IsNullOrWhiteSpace( error.Message ) )
+        {
+            return error.Message;
+        }
+        string reason = string.IsNullOrWhiteSpace( error?.Message ) ? string.Empty : ApplyRecovery.ShortReason( error.Message ).TrimEnd( '.', ' ' );
+        if ( reason.Length == 0 )
+        {
+            reason = "an unexpected error occurred";
+        }
+        return "The action could not be completed: " + reason + ". The session continues.";
+    }
+}
+
+/// <summary>What <see cref="ContentFailureRules.ClassifyActionFailure"/> decided about an exception from a user action.</summary>
+public enum ActionFailureAction
+{
+    /// <summary>Show a notice; the session continues.</summary>
+    Notice,
+
+    /// <summary>An integrity failure: the session ends, fail-closed.</summary>
+    Fail
 }

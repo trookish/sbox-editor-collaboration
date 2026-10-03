@@ -6544,7 +6544,7 @@ Assert( HashOf( MetaFileRules.Canonical( "a.scene.meta", Utf8( "\uFEFF{\"guid\":
 
 
 // ---- A host with no relay is told plainly what that means ------------------------------------------------------------------------------------
-Assert( RelayDefaults.NoRelayNotice( effectiveRelay: null, configured: null ) is { } none && none.Contains( "same network" ) && none.Contains( "Set up relay" ), "with no relay at all the host is told friends on other networks cannot join, and where to set one up" );
+Assert( RelayDefaults.NoRelayNotice( effectiveRelay: null, configured: null ) is { } none && none.Contains( "same network" ) && !none.Contains( "Set up relay" ) && !none.Contains( "Setup tab" ), "with no relay at all the host is told friends on other networks cannot join, and is no longer sent to the Cloudflare setup (the automatic internet relay covers this case)" );
 Assert( RelayDefaults.NoRelayNotice( effectiveRelay: null, configured: "off" ) is { } off && off.Contains( "turned off" ) && !off.Contains( "Set up relay" ), "a project that turned relaying off is told so, not told to set one up" );
 Assert( RelayDefaults.NoRelayNotice( effectiveRelay: "wss://x.example.com/relay", configured: null ) == null, "with a relay in use there is nothing to warn about" );
 Assert( RelayDefaults.NoRelayNotice( effectiveRelay: "ws://localhost:8080/relay", configured: "ws://localhost:8080/relay" ) is { } local && local.Contains( "this computer" ), "a relay on localhost is called out as reachable only from this computer, because that is exactly what made a friend's join fail" );
@@ -6705,8 +6705,8 @@ Assert( RelayDefaults.NoRelayNotice( effectiveRelay: "ws://localhost:8080/relay"
     RelaySetupView Describe( string project = null, string local = null, string builtIn = null, bool working = false, string progress = null, DeployResult last = null ) =>
         RelaySetupRules.Describe( new RelaySetupInput( project, local, builtIn, working, progress, last ) );
     var rsMissing = Describe();
-    Assert( rsMissing.Mode == RelaySetupMode.Missing && rsMissing.ShowOpen && rsMissing.ShowSetup && !rsMissing.ShowCancel && !rsMissing.IsProblem && rsMissing.Text.Contains( "No relay is set up" ) && rsMissing.Text.Contains( "clipboard" ),
-        "with no relay at all the card offers both buttons and explains the two steps" );
+    Assert( rsMissing.Mode == RelaySetupMode.Missing && rsMissing.ShowOpen && rsMissing.ShowSetup && !rsMissing.ShowCancel && !rsMissing.IsProblem && rsMissing.Text.Contains( "optional" ) && !rsMissing.Text.Contains( "No relay is set up" ) && rsMissing.Text.Contains( "clipboard" ),
+        "with no relay of one's own the card (advanced) offers both buttons, explains the two steps and says the automatic internet relay makes one optional" );
     var rsSharedView = Describe( builtIn: RsShared );
     Assert( rsSharedView.Mode == RelaySetupMode.Shared && !rsSharedView.ShowOpen && !rsSharedView.ShowSetup && rsSharedView.Text.Contains( "shared.workers.dev" ), "with the library's shared relay there is nothing to set up, and the card names it" );
     Assert( Describe( local: RsOwn, builtIn: RsShared ).Mode == RelaySetupMode.Own && Describe( project: "wss://proj.example.com/relay", local: RsOwn, builtIn: RsShared ).Mode == RelaySetupMode.Project,

@@ -122,12 +122,28 @@ public sealed partial class SessionServer
         foreach ( var entry in entries ) fileAuthority.Seed( entry.Path, entry.Sha256 );
         for ( int i = 0; i == 0 || i < entries.Count; i += FileSyncLimits.IndexPage )
         {
+            bool final = i + FileSyncLimits.IndexPage >= entries.Count;
             member.Wire.Send( new Packet
             {
                 Kind = "files-index",
                 FileEntries = entries.Skip( i ).Take( FileSyncLimits.IndexPage ).ToList(),
-                Final = i + FileSyncLimits.IndexPage >= entries.Count
+                Final = final,
+                // Only the names, only on the last page: the project file is Code and is never sent, but the guest can say what it lacks.
+                Packages = final ? HostPackages() : null
             } );
+        }
+    }
+
+    private List<string> HostPackages()
+    {
+        try
+        {
+            string file = Directory.EnumerateFiles( FileProjectRoot, "*.sbproj", SearchOption.TopDirectoryOnly ).OrderBy( x => x, StringComparer.Ordinal ).FirstOrDefault();
+            return file == null ? null : PackageReferenceDiff.Idents( File.ReadAllText( file ) );
+        }
+        catch ( Exception ex ) when ( ex is IOException or UnauthorizedAccessException )
+        {
+            return null;
         }
     }
 

@@ -122,6 +122,14 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
 
     private readonly Dictionary<string, Tracked> scenes = new Dictionary<string, Tracked>();
 
+    // Remote receipts arrive at drag rates, and every one used to reset the whole native undo history. The scene is still applied per receipt;
+    // only the history reset (Initialize + MirrorNativeUndo) is coalesced by UndoResetScheduler, and the scenes awaiting it are kept here.
+    private readonly UndoResetScheduler undoReset = new UndoResetScheduler();
+
+    private readonly HashSet<Tracked> undoResetScenes = new HashSet<Tracked>();
+
+    private static readonly System.Diagnostics.Stopwatch undoResetClock = System.Diagnostics.Stopwatch.StartNew();
+
     private Wire wire;
 
     private SessionServer server;
@@ -1878,6 +1886,8 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
         ActionNotice = null;
         actionNoticeExpires = default;
         ClearNativeUndoMirrors();
+        undoReset.Flush();
+        undoResetScenes.Clear();
         recoverArmed = false;
         recoverAttempts = 0;
         recoverNextAttempt = default;
@@ -1971,17 +1981,22 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
 
     public void ReportAction(Exception error)
     {
-        if (error != null)
+        if (error == null)
         {
-            if (!ActionRefusalRules.IsRefusal(error))
-            {
-                Fail(error.Message);
-            }
-            else
-            {
-                SetActionNotice(error.Message);
-            }
+            return;
         }
+        // A failure of one user action (save, undo, redo, play toggle, a dock button) is reported and the session continues; only the integrity
+        // failures docs/FAILURE-MODES.md keeps fail-closed still end it (ContentFailureRules.ClassifyActionFailure).
+        if (ContentFailureRules.ClassifyActionFailure(error) == ActionFailureAction.Fail)
+        {
+            Fail(error.Message);
+            return;
+        }
+        if (!ActionRefusalRules.IsRefusal(error))
+        {
+            GlobalGameNamespace.Log.Warning("Collaboration action: " + CollaborationTransportDiagnostics.BoundedExceptionDiagnostic(string.Empty, error));
+        }
+        SetActionNotice(ContentFailureRules.ActionFailureNotice(error));
     }
 
     public void ClearRecordedFailure()
@@ -2206,6 +2221,7 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                 AbandonReconnect(CollaborationTransportDiagnostics.BoundedExceptionDiagnostic("Reconnect could not continue: ", error));
             }
             server?.Pump();
+            RunUndoResetIfDue();
             try
             {
                 orgDirectory?.Poll();
@@ -3763,8 +3779,9 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                                 tracked2.SkippedObjects.Remove(applied.Id);
                             }
                         }
-                        tracked2.Session.UndoSystem.Initialize();
-                        MirrorNativeUndo(tracked2);
+                        // The scene above is already applied. Only the history reset is coalesced (UndoResetScheduler): a drag of another
+                        // person would otherwise reset the whole native undo history on every packet.
+                        RequestUndoReset(tracked2);
                     }
                 }
                 SetMergeNotice(ChangeRebase.JoinNotices(rebaseNotices.ToArray()));
@@ -4095,6 +4112,8 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
 
     public void Undo()
     {
+        // A coalesced reset still pending would leave a stale snapshot under this undo; run it first.
+        FlushUndoReset();
         string text = SceneAdapter.PathOf(SceneEditorSession.Active);
         if (!Connected || Error != null || text == null || !scenes.TryGetValue(text, out var value) || !value.Ready || value.Pending != null || value.Undo.Count == 0)
         {
@@ -4122,6 +4141,53 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
         value.Undo.Pop();
         value.UndoPending = true;
         SendEdit(text, value, list, final: true);
+    }
+
+    // The coalesced half of "apply, capture, Initialize, MirrorNativeUndo". Runs the first request of a burst at once and holds the rest;
+    // Frame() releases what is held, and Undo/TryRedo flush it before they act (see UndoResetScheduler for the bounded stale window).
+    private void RequestUndoReset(Tracked tracked)
+    {
+        undoResetScenes.Add(tracked);
+        undoReset.Request(undoResetClock.Elapsed.TotalMilliseconds);
+        RunUndoResetIfDue();
+    }
+
+    private void RunUndoResetIfDue()
+    {
+        if (undoReset.Pending && undoReset.ShouldRunNow(undoResetClock.Elapsed.TotalMilliseconds))
+        {
+            RunPendingUndoResets();
+        }
+    }
+
+    private void FlushUndoReset()
+    {
+        if (undoReset.Flush())
+        {
+            RunPendingUndoResets();
+        }
+    }
+
+    private void RunPendingUndoResets()
+    {
+        Tracked[] pendingScenes = undoResetScenes.ToArray();
+        undoResetScenes.Clear();
+        foreach (Tracked tracked in pendingScenes)
+        {
+            try
+            {
+                // A scene that was closed or replaced since the request has nothing to reset.
+                if (tracked.Session != null && tracked.Session.Scene.IsValid() && scenes.ContainsValue(tracked))
+                {
+                    tracked.Session.UndoSystem.Initialize();
+                    MirrorNativeUndo(tracked);
+                }
+            }
+            catch (Exception error)
+            {
+                GlobalGameNamespace.Log.Error("Collaboration undo reset: " + CollaborationTransportDiagnostics.BoundedExceptionDiagnostic(string.Empty, error));
+            }
+        }
     }
 
     private void MirrorNativeUndo(Tracked tracked)
@@ -4209,6 +4275,7 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
     {
         try
         {
+            FlushUndoReset();
             if (changes == null || changes.Count == 0 || !Connected || Error != null || tracked == null || tracked.Session == null || !tracked.Session.Scene.IsValid())
             {
                 SetUndoNotice("Redo is not available for this collaboration operation.");

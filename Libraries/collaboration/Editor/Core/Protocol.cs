@@ -49,6 +49,13 @@ public sealed class Packet
     public List<FileIndexEntry> FileEntries { get; set; }
 
     /// <summary>
+    /// On the final files-index page: the package identifiers the host's .sbproj lists (PackageReferenceDiff.Idents, at most 50). The project
+    /// file itself is Code and never travels; only these validated names do, so a guest can be told what its project does not list.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<string> Packages { get; set; }
+
+    /// <summary>
     /// What the host supports, sent on welcome. A guest starts file synchronization only when it holds FileSyncLimits.Feature: a newer
     /// guest is admitted by an older host, which would answer an unknown message kind with a fatal error.
     /// </summary>

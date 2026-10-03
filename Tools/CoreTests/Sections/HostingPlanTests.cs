@@ -102,22 +102,22 @@ static class HostingPlanTests
         assert( reachableNoHost.Action == HostingAction.None && reachableNoHost.Phase != HostingPhase.Ready, "hosting_publish_waits_for_local_host" );
         assert( hostLate.Pump( Up( 16 ) ).Action == HostingAction.PublishRelayInvite, "hosting_publish_when_local_host_ready" );
 
-        // Probes every 3 s, never a publish, and a failure only once 75 s of probing have passed.
+        // Probes every 3 s, never a publish, and a failure only once 150 s of probing have passed.
         HostingPlan capped = Started();
         capped.Pump( Up( 10 ) );
         int probes = 0;
         bool publishedEarly = false, failedEarly = false;
-        for ( double t = 15; t < 90; t += 0.5 )
+        for ( double t = 15; t < 165; t += 0.5 )
         {
             HostingDecision step = capped.Pump( Up( t, probe: Unreachable ) );
             probes += step.Action == HostingAction.ProbeReachability ? 1 : 0;
             publishedEarly |= step.Action == HostingAction.PublishRelayInvite;
             failedEarly |= step.Phase == HostingPhase.Failed;
         }
-        assert( !publishedEarly && !failedEarly, "hosting_cap_not_before_seventy_five" );
-        assert( probes >= 20 && probes <= 26, "hosting_probe_cadence_three_seconds" );
-        HostingDecision timedOut = capped.Pump( Up( 90, probe: Unreachable ) );
-        assert( timedOut.Phase == HostingPhase.Failed && capped.Reason.Contains( "75 seconds" ), "hosting_seventy_five_second_cap" );
+        assert( !publishedEarly && !failedEarly, "hosting_cap_not_before_one_hundred_fifty" );
+        assert( probes >= 40 && probes <= 46, "hosting_probe_cadence_three_seconds" );
+        HostingDecision timedOut = capped.Pump( Up( 165, probe: Unreachable ) );
+        assert( timedOut.Phase == HostingPhase.Failed && capped.Reason.Contains( "150 seconds" ), "hosting_one_hundred_fifty_second_cap" );
         assert( timedOut.Status.Contains( "Friends on your network can still join" ), "hosting_lan_survives_failure" );
 
         // Only a public wss address is ever published, whatever the tunnel reported.

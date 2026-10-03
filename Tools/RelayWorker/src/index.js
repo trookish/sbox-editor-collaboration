@@ -20,7 +20,8 @@ const MAX_CHUNK_BYTES = 16 * 1024;
 const MAX_FRAME_BYTES = MAX_CHUNK_BYTES + 5;
 const MAX_CONTROL_CHARS = 1024;
 const MAX_KEY_CHARS = 128;
-const MAX_GUESTS_PER_ROOM = 16;
+// Guests besides the host: a session holds four participants, the host included (SessionLimits.MaxParticipants in the library).
+const MAX_GUESTS_PER_ROOM = 3;
 const HELLO_TIMEOUT_MS = 10_000;
 const BYTES_PER_SECOND = 8 * 1024 * 1024;
 const BURST_BYTES = 16 * 1024 * 1024;

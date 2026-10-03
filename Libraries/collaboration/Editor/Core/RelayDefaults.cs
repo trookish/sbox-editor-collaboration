@@ -33,7 +33,9 @@ public static class RelayDefaults
         {
             return "Relaying is turned off for this project (RelayUrl is \"off\"), so friends can join only from your network or through a port you forward.";
         }
-        return "No relay is set up, so friends can join only from the same network or through a port you forward. To let friends anywhere join, open the Setup tab and press Set up relay.";
+        // No relay is named anywhere. The automatic internet relay (HostingPlan) covers this case whenever it is on, so this sentence is reached only
+        // by a caller that has no plan to report; it states the fact and does not send anyone to the Cloudflare account setup.
+        return "No relay is configured, so friends can join only from the same network or through a port you forward.";
     }
 
     /// <summary>The relay to use: the project's own if it names one, nothing if it says "off", otherwise the built-in one.</summary>

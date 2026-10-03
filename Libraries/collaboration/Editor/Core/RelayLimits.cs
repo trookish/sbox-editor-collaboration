@@ -11,11 +11,11 @@ namespace TeamCreate;
 public static class RelayLimits
 {
     /// <summary>
-    /// People in one session through this relay. This is deliberately smaller than the library's general host limit of 16 connections
-    /// (a literal in SessionServer, which still applies on top of this): that limit suits friends on a trusted network, while this one bounds
-    /// strangers on a home connection.
+    /// People in one session through this relay, the host included: the same number as <see cref="SessionLimits.MaxParticipants"/>, so the relay
+    /// never accepts a guest the host's server would turn away. SessionServer's own 16-socket bound on connections that have not yet
+    /// said hello (SessionLimits.MaxConnections) still applies on top of this.
     /// </summary>
-    public const int MaxMembersPerRoom = 4;
+    public const int MaxMembersPerRoom = SessionLimits.MaxParticipants;
 
     /// <summary>
     /// The largest single frame the relay forwards. The library itself never sends more than <see cref="RelayProtocol.MaxMessageBytes"/> (about 16 KiB),

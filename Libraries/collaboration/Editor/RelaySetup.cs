@@ -177,7 +177,7 @@ public static class RelaySetup
 
     public static RelaySetupView Describe(string projectRelay)
     {
-        RelaySetupView view = RelaySetupRules.Describe(new RelaySetupInput(projectRelay, LocalRelay, RelayDefaults.DefaultUrl, Working, progress, LastResult));
+        RelaySetupView view = RelaySetupRules.Describe(new RelaySetupInput(projectRelay, LocalRelay, RelayDefaults.DefaultUrl, Working, progress, LastResult, InternetRelayEnabled));
         if (localProblem != null && view.Mode == RelaySetupMode.Missing)
         {
             return view with { Text = localProblem + " " + view.Text, IsProblem = true };

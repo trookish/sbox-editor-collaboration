@@ -182,6 +182,12 @@ public sealed class FileSyncClient : IDisposable
         var plan = FileJoinPlan.Plan( remote, local, openScenes );
         if ( plan.CodeNotice != null ) Notify( plan.CodeNotice );
         foreach ( string notice in plan.Notices ) Notify( notice );
+        // Reported once, never installed: the packages are the person's to add, and the project file is not transferred.
+        if ( p.Packages != null )
+        {
+            string packageNotice = PackageReferenceDiff.Notice( PackageReferenceDiff.Missing( p.Packages.Take( PackageReferenceDiff.MaxIdents ), LocalProjectFile() ) );
+            if ( packageNotice != null ) Notify( packageNotice );
+        }
         foreach ( var entry in local.Where( x => JoinReadiness.Classify( x.Path ) == ProjectFileKind.Asset ) ) known[entry.Path] = entry;
         foreach ( var entry in plan.Fetch )
         {
@@ -196,6 +202,20 @@ public sealed class FileSyncClient : IDisposable
         }
         remote.Clear();
         JoinReady = fetches.Count == 0;
+    }
+
+    // The guest's own project file, read only to compare package names; null when there is none or it cannot be read (then every host package is reported).
+    private string LocalProjectFile()
+    {
+        try
+        {
+            string file = Directory.EnumerateFiles( root, "*.sbproj", SearchOption.TopDirectoryOnly ).OrderBy( x => x, StringComparer.Ordinal ).FirstOrDefault();
+            return file == null ? null : File.ReadAllText( file );
+        }
+        catch ( Exception ex ) when ( ex is IOException or UnauthorizedAccessException )
+        {
+            return null;
+        }
     }
 
     private void StartNextFetch( Action<Packet> send )
