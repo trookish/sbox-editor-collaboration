@@ -12,5 +12,7 @@ static partial class SharedPlayTests
         Whitelist( assert );
         FreeFly( assert );
         Sampler( assert );
+        Mirror( assert );
+        Bandwidth( assert );
     }
 }
