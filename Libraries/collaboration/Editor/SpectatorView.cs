@@ -130,9 +130,9 @@ public sealed class SpectatorView : SceneRenderingWidget
         lastMouse = e.LocalPosition;
     }
 
-    protected override void OnWheel( WheelEvent e )
+    protected override void OnMouseWheel( WheelEvent e )
     {
-        base.OnWheel( e );
+        base.OnMouseWheel( e );
         wheel += e.Delta > 0 ? 1 : e.Delta < 0 ? -1 : 0;
         e.Accept();
     }
