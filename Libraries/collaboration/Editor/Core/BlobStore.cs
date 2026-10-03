@@ -167,6 +167,23 @@ public sealed class BlobStore
         return Store( hash, bytes );
     }
 
+    /// <summary>
+    /// Records bytes the caller has just hashed itself (<see cref="BlobRules.Externalize"/> does, to name them), without hashing again. This runs for every
+    /// mesh on every scan, so a blob already in memory is only touched: no copy, no disk check.
+    /// </summary>
+    public void AddTrusted( string hash, byte[] bytes )
+    {
+        lock ( gate )
+        {
+            if ( memory.TryGetValue( hash, out Entry known ) )
+            {
+                known.Touched = ++clock;
+                return;
+            }
+            if ( bytes.Length > 0 && bytes.Length <= BlobLimits.MaxBlobBytes ) Store( hash, bytes );
+        }
+    }
+
     public static string TooLarge() => "The geometry is larger than the 32 MiB collaboration limit and was not synchronized.";
 
     public bool Has( string hash )

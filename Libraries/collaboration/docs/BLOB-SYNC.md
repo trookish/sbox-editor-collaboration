@@ -83,3 +83,27 @@ The terrain *shape* is in the `.terrain` asset (and its `.terrain_d` sidecar), n
 ## 9. Fallback (not taken, kept for the record)
 
 Had the evidence shown that `Serialize()` outside a context yields only `{ "$blob": "<guid>" }` and no public route restores it, the fallback would be: detect those objects, keep them out of the edit stream, show once per object `The geometry of "<name>" is edited with the mapping tool and is shared when the scene is saved.`, and rely on file sync of the saved scene and its `_d` sidecar, which an editor that has the scene open would not reload. The evidence in section 1 shows the fallback is not needed for meshes.
+
+## 10. Implementation map and verification
+
+| Piece | File | Notes |
+|-------|------|-------|
+| Content-addressed store (memory LRU 256 MiB, disk `.collaboration/blobs/<sha256>` 256 MiB pruned by age, atomic writes, hash checked on read, only 64 lowercase hex digits ever reach the file system) | `Core/BlobStore.cs` | pure |
+| Placeholder rules, `Externalize` / `Internalize`, version limiter (500 ms per object) | `Core/BlobRules.cs` | pure |
+| Held-packet exchange: `blob-need` / `blob-data` / `blob-ack`, window of 8 chunks, 64 MiB pending (shared by all members on a host), 32 held packets, 60 s timeout | `Core/BlobExchange.cs` | pure; chunk shape rule shared with file sync (`FileChunkAssembler.IsValidChunk`) |
+| Host side: one exchange per member, welcome feature `blobs-1`, `reject` for a refused edit | `Core/SessionServer.Blobs.cs` | |
+| Editor side: capture/apply, re-encoding alias, terrain notice | `SceneAdapter.cs`, `BlobHub.cs` | engine-dependent, compiled by the Compile gate only |
+| Client wiring (feature negotiation, held packets, resync of a dropped update) | `CollaborationSession.cs` | |
+
+Details that are not obvious from the design above:
+
+* **Re-encoding.** The engine does not promise that loading a mesh and saving it again yields the same bytes. After applying a received mesh the editor reads the mesh back; if the hash differs it records the new hash as an alias of the received one (`SceneAdapter.geometryAliases`), so the next scan reads the object as unchanged. Without this the two editors could pass the same mesh back and forth. **Unknown** whether the engine re-encodes at all; the alias costs nothing when it does not.
+* **Feature negotiation.** Capture replaces geometry by placeholders only while connected to a host that advertises `blobs-1`. A host without it keeps getting inline base64 as before (and the old size limits).
+* **Terrain notice.** `Terrain changes reach other editors when the terrain asset is saved.` is added once per editor session, when a `Terrain` component is first captured. Whether the file arrives while the scene is open (`RefreshAsset`) is the existing file-sync behaviour.
+* **Rate limit scope.** Only the scan that decides what to send is limited (`Capture( ..., limitGeometryRate: true )`); apply, recovery and digest computation see the real scene.
+
+### Verification actually performed
+
+* `Tools/CoreTests`: sections `BlobSyncTests` (store, placeholders, canonical base64, version limiter, exchange bounds) and `BlobServerTests` (a real `SessionServer` over loopback with two fake editors, each with its own store and exchange: the second editor receives the edit and the 700 KB geometry intact through the host; a missing blob rejects the edit; presence is not held behind a waiting edit; a host without a store does not advertise the feature).
+* Guards proven red then green (production line broken, named assertion failed, line restored): hold-until-complete (`blobserver_the_geometry_reaches_the_other_editor_intact_through_the_host`), hash verification (`blob_store_refuses_bytes_that_do_not_match_the_hash`), pending-bytes bound (`blob_pending_bytes_over_64_mib_are_refused_without_throwing_and_released`), pending-packet bound (`blob_the_pending_packet_bound_refuses_without_throwing`), timeout (`blob_a_held_packet_is_dropped_at_the_timeout`), size refusal (red through the test sink throwing `must not be handed over`, not through a named assertion).
+* **Not verified:** anything that needs the running engine. `SceneAdapter` capture/apply, the re-encoding alias, the `CollaborationSession` wiring and the claim that `Serialize()` writes the mesh inline are compiled (Compile gate) but never executed. Section 8 is the procedure that settles them.

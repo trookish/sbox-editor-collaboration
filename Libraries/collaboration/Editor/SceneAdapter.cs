@@ -72,7 +72,18 @@ public static class SceneAdapter
         return text;
     }
 
-    public static Dictionary<string, ObjectState> Capture(Scene scene, IReadOnlyDictionary<string, ObjectState> confirmed = null, ISet<string> failed = null)
+    /// <summary>
+    /// The live scene as states. While <see cref="BlobHub.Enabled"/>, mesh geometry is replaced in each state by a placeholder naming its
+    /// SHA-256 and the bytes go to <see cref="BlobHub.Store"/> (docs/BLOB-SYNC.md). <paramref name="limitGeometryRate"/> is for the scan
+    /// that decides what to send: an object whose geometry changed less than 500 ms after the last version keeps its confirmed state this time
+    /// (the latest geometry goes out once the interval has passed). Other callers need the scene as it is and must not set it.
+    /// </summary>
+    public static Dictionary<string, ObjectState> Capture(Scene scene, IReadOnlyDictionary<string, ObjectState> confirmed = null, ISet<string> failed = null, bool limitGeometryRate = false)
+    {
+        return CaptureCore( scene, confirmed, failed, limitGeometryRate, BlobHub.Enabled );
+    }
+
+    private static Dictionary<string, ObjectState> CaptureCore(Scene scene, IReadOnlyDictionary<string, ObjectState> confirmed, ISet<string> failed, bool limitGeometryRate, bool externalize)
     {
         Dictionary<string, ObjectState> result = new Dictionary<string, ObjectState>();
         skipped.TryGetValue( scene, out Dictionary<string, List<SkippedComponent>> held );
@@ -111,6 +122,10 @@ public static class SceneAdapter
                     }
                 }
             }
+            if (limitGeometryRate && externalize && confirmed != null)
+            {
+                HoldFastGeometry(result, confirmed);
+            }
             return result;
         }
         void Flatten(JsonObject data, string parent, int order)
@@ -118,6 +133,11 @@ public static class SceneAdapter
             string value = data["__guid"].GetValue<string>();
             JsonArray jsonArray = data["Children"] as JsonArray;
             data.Remove("Children");
+            if (externalize)
+            {
+                ExternalizeGeometry(data);
+            }
+            NoteTerrain(data);
             data[SiblingOrder.Key] = order;
             if ( held != null && held.TryGetValue( value, out List<SkippedComponent> missing ) )
             {
@@ -130,6 +150,129 @@ public static class SceneAdapter
                 foreach (JsonNode item in jsonArray)
                 {
                     Flatten(item.AsObject(), value, childOrder++);
+                }
+            }
+        }
+    }
+
+    // Geometry the engine re-encoded differently after loading it: the hash of the re-encoding -> the hash the mesh was received as.
+    private static readonly Dictionary<string, string> geometryAliases = new Dictionary<string, string>( StringComparer.Ordinal );
+
+    private const string TerrainNotice = "Terrain changes reach other editors when the terrain asset is saved.";
+
+    private static bool terrainReported;
+
+    // Mesh geometry becomes a placeholder and its bytes go to the shared store. A value over the size limit stays inline; the structural
+    // rules then refuse the object by name.
+    private static void ExternalizeGeometry( JsonObject data )
+    {
+        BlobRules.Externalize( data, ( hash, bytes ) => BlobHub.Store.AddTrusted( hash, bytes ), null, geometryAliases );
+    }
+
+    // Terrain sculpting lives in the .terrain asset (and its _d file), not in the scene object, so it is shared by file synchronization
+    // when the asset is saved. Said once per editor session, the first time a Terrain component is captured.
+    private static void NoteTerrain( JsonObject data )
+    {
+        if ( terrainReported || data["Components"] is not JsonArray components )
+        {
+            return;
+        }
+        foreach ( JsonNode component in components )
+        {
+            if ( component?["__type"] is JsonValue value && value.TryGetValue( out string type ) && ( type == "Terrain" || type.EndsWith( ".Terrain", StringComparison.Ordinal ) ) )
+            {
+                terrainReported = true;
+                notices.Add( TerrainNotice );
+                return;
+            }
+        }
+    }
+
+    // An object whose geometry changed again within 500 ms keeps its confirmed state for this scan; an object that is not confirmed yet is
+    // left out together with everything below it, so the states sent never name a parent that is missing.
+    private static void HoldFastGeometry( Dictionary<string, ObjectState> result, IReadOnlyDictionary<string, ObjectState> confirmed )
+    {
+        List<string> denied = new List<string>();
+        foreach ( ObjectState state in result.Values )
+        {
+            if ( !BlobHub.Limiter.Admit( state.Id, BlobRules.Referenced( state.Data ) ) )
+            {
+                denied.Add( state.Id );
+            }
+        }
+        HashSet<string> dropped = new HashSet<string>( StringComparer.Ordinal );
+        foreach ( string id in denied )
+        {
+            if ( confirmed.TryGetValue( id, out ObjectState previous ) )
+            {
+                result[id] = previous;
+            }
+            else
+            {
+                dropped.Add( id );
+            }
+        }
+        bool expanded = dropped.Count > 0;
+        while ( expanded )
+        {
+            expanded = false;
+            foreach ( ObjectState state in result.Values )
+            {
+                if ( dropped.Contains( state.Parent ) ) expanded |= dropped.Add( state.Id );
+            }
+        }
+        foreach ( string id in dropped ) result.Remove( id );
+    }
+
+    // The changes with every placeholder replaced by the exact geometry text, ready for the engine. An object whose geometry this editor
+    // does not hold is not applied half-way: the exception is the ordinary apply failure, which the session recovers from by synchronizing
+    // the scene again (the geometry then arrives first, through the exchange). The placeholder-form states are returned for aliasing.
+    private static List<Change> InternalizeChanges( List<Change> list, out Dictionary<string, ObjectState> originals )
+    {
+        originals = new Dictionary<string, ObjectState>( StringComparer.Ordinal );
+        List<Change> result = new List<Change>( list.Count );
+        foreach ( Change change in list )
+        {
+            if ( (object)change.After == null || !BlobRules.ContainsPlaceholder( change.After.Data ) )
+            {
+                result.Add( change );
+                continue;
+            }
+            JsonObject data = BlobRules.Internalize( change.After.Data, BlobHub.Store, out List<string> missing );
+            if ( data == null )
+            {
+                throw new InvalidOperationException( "The mesh geometry of \"" + StateRules.NameOf( change.After, change.Id ) + "\" is not available in this editor yet; the scene is synchronized again." );
+            }
+            originals[change.Id] = change.After;
+            result.Add( change with { After = new ObjectState( change.After.Id, change.After.Parent, data ) } );
+        }
+        return result;
+    }
+
+    // After applying, the engine's own re-encoding of each mesh is read back. If it is not byte-identical to what was received, the new hash is
+    // recorded as another name for the received one, so the next scan sees no change and the mesh is not sent back.
+    private static void RememberReEncodings( Dictionary<string, GameObject> live, Dictionary<string, ObjectState> originals )
+    {
+        foreach ( KeyValuePair<string, ObjectState> pair in originals )
+        {
+            if ( !live.TryGetValue( pair.Key, out GameObject gameObject ) || !gameObject.IsValid() )
+            {
+                continue;
+            }
+            JsonObject again = JsonNode.Parse( gameObject.Serialize().ToJsonString() ).AsObject();
+            again.Remove( "Children" );
+            BlobRules.Externalize( again, ( hash, bytes ) => BlobHub.Store.AddTrusted( hash, bytes ), null );
+            List<string> received = BlobRules.Referenced( pair.Value.Data );
+            List<string> reEncoded = BlobRules.Referenced( again );
+            if ( received.Count != reEncoded.Count )
+            {
+                continue;
+            }
+            for ( int i = 0; i < received.Count; i++ )
+            {
+                if ( received[i] != reEncoded[i] )
+                {
+                    geometryAliases[reEncoded[i]] = received[i];
                 }
             }
         }
@@ -192,8 +335,10 @@ public static class SceneAdapter
         {
             StateRules.ValidateGraph(target);
             Dictionary<string, GameObject> live = Walk(scene).ToDictionary((GameObject x) => x.Id.ToString());
-            Dictionary<string, ObjectState> before = Capture(scene);
-            List<Change> list = StateRules.Diff(before, target);
+            // The scene is read in the same form as the target: with placeholders when the target has any, so an unchanged mesh is not a difference.
+            bool placeholders = BlobHub.Enabled || target.Values.Any((ObjectState x) => BlobRules.ContainsPlaceholder(x.Data));
+            Dictionary<string, ObjectState> before = CaptureCore(scene, null, null, false, placeholders);
+            List<Change> list = InternalizeChanges(StateRules.Diff(before, target), out Dictionary<string, ObjectState> geometryChanges);
             Dictionary<string, List<SkippedComponent>> held = skipped.GetValue( scene, _ => new Dictionary<string, List<SkippedComponent>>() );
 
             // Prefab instances, and objects becoming or ceasing to be one, are rebuilt from their state.
@@ -252,6 +397,7 @@ public static class SceneAdapter
                 }
             }
             ApplySiblingOrder(scene, target, live);
+            RememberReEncodings(live, geometryChanges);
             session.HasUnsavedChanges |= list.Count > 0;
         }
     }

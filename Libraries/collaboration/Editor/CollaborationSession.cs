@@ -349,6 +349,74 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
 
     private string lastHostFileNotice;
 
+    // The geometry channel of this editor's connection (null while the host does not advertise it). It serves what the host asks for, holds
+    // scene packets whose geometry has not arrived and releases them in order (docs/BLOB-SYNC.md).
+    private BlobExchange blobs;
+
+    private string lastHostBlobNotice;
+
+    // The next packet to handle: one released by the exchange first, then the wire. Geometry packets are consumed here.
+    private bool NextIncoming(out Packet packet)
+    {
+        while (true)
+        {
+            if (blobs != null && blobs.TryTakeReady(out packet))
+            {
+                return true;
+            }
+            if (!wire.Incoming.TryDequeue(out packet))
+            {
+                return false;
+            }
+            if (blobs == null)
+            {
+                return true;
+            }
+            if (BlobExchange.IsBlobPacket(packet.Kind))
+            {
+                lastReceive = DateTime.UtcNow;
+                blobs.Handle(packet);
+                continue;
+            }
+            if (blobs.Offer(packet) == BlobOffer.Process)
+            {
+                return true;
+            }
+            lastReceive = DateTime.UtcNow;
+        }
+    }
+
+    // Once per frame: asks for missing geometry, serves requests, and for every scene update that had to be discarded (a bound was reached,
+    // the geometry did not arrive or did not verify) asks the host for the scene again, with the reason shown to the person.
+    private void PumpBlobs()
+    {
+        if (blobs == null)
+        {
+            return;
+        }
+        blobs.Pump();
+        foreach ((Packet Packet, string Reason) item in blobs.TakeDropped())
+        {
+            Tracked affected = item.Packet.Scene == null ? null : TrackedFor(item.Packet.Scene);
+            if (affected != null && affected.Session.Scene.IsValid() && !affected.Recovery.Paused)
+            {
+                affected.Recovery.Requested();
+                RequestSceneResync(item.Packet.Scene, affected);
+            }
+        }
+        foreach (string notice in blobs.TakeNotices())
+        {
+            GlobalGameNamespace.Log.Info("Collaboration: " + notice);
+            SetActionNotice(notice);
+        }
+        string hostNotice = server?.BlobNotice;
+        if (hostNotice != null && !string.Equals(hostNotice, lastHostBlobNotice, StringComparison.Ordinal))
+        {
+            lastHostBlobNotice = hostNotice;
+            GlobalGameNamespace.Log.Info("Collaboration: " + hostNotice);
+        }
+    }
+
     // Scene files open in this editor are owned by the live scene sync, so file sync neither fetches nor sends them. PathOf is lowercase
     // and relative to Assets; the comparison in FileSyncClient is case-insensitive.
     private static string[] OpenFileScenes() => SceneEditorSession.All.Where( x => !(x is GameEditorSession) && !x.IsPrefabSession ).Select( x => SceneAdapter.PathOf( x ) ).Where( x => x != null ).Select( x => "Assets/" + x ).ToArray();
@@ -1128,6 +1196,8 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
             {
                 SessionServer result = new SessionServer(plan.Address, num2, project, baseline, plan.Token, text, null, (Packet hello) => SoloMayVouch(hello) ? Task.FromResult(SteamTokenVerdict.Verified) : new SteamTokenHttpVerifier(SandboxHttpTokenTransport.Default).VerifyAsync(hello, hostVerificationLifetime.Token), plan.SessionKey);
                 result.FileProjectRoot = Project.Current.RootDirectory.FullName;
+                BlobHub.Store.AttachDisk(SceneAdapter.Root, BlobLimits.DiskCacheBytes);
+                result.BlobStore = BlobHub.Store;
                 result.HostEngineBaseline = SceneAdapter.EngineBaseline();
                 result.FileChanged = RefreshAsset;
                 boundPort = num2;
@@ -2045,6 +2115,9 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
         server = null;
         projectFiles?.Dispose();
         projectFiles = null;
+        blobs?.Release();
+        blobs = null;
+        BlobHub.Enabled = false;
         Connected = false;
         try
         {
@@ -2345,6 +2418,7 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                 throw new InvalidOperationException("Stop play mode or complete the approved runtime lifecycle before applying source packets");
             }
             Packet result;
+            PumpBlobs();
             if (decision == PlaySpectateDecision.Normal)
             {
                 // Changes held while playing come first so they land in the order the host accepted them.
@@ -2353,7 +2427,7 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                     ProcessIncoming(result);
                 }
             }
-            while (wire.Incoming.TryDequeue(out result))
+            while (NextIncoming(out result))
             {
                 if (decision != PlaySpectateDecision.Normal && HeldPacketBuffer.IsSceneChange(result.Kind))
                 {
@@ -3166,7 +3240,7 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
     private Dictionary<string, ObjectState> CaptureTolerant(string scene, Tracked tracked)
     {
         HashSet<string> failures = new HashSet<string>(StringComparer.Ordinal);
-        Dictionary<string, ObjectState> live = SceneAdapter.Capture(tracked.Session.Scene, tracked.Known, failures);
+        Dictionary<string, ObjectState> live = SceneAdapter.Capture(tracked.Session.Scene, tracked.Known, failures, limitGeometryRate: true);
         foreach (string id in failures)
         {
             if (tracked.SkippedObjects.Add(id))
@@ -3336,6 +3410,17 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
             hostSession = p.Session;
             projectFiles?.Dispose();
             projectFiles = null;
+            // Geometry is replaced by placeholders only for a host that advertises the channel that carries it; an older host would take the
+            // placeholder for the mesh.
+            blobs?.Release();
+            blobs = null;
+            BlobHub.Enabled = false;
+            if (p.Features != null && p.Features.Contains( BlobLimits.Feature ))
+            {
+                BlobHub.Store.AttachDisk( SceneAdapter.Root, BlobLimits.DiskCacheBytes );
+                blobs = new BlobExchange( BlobHub.Store, packet => wire.Send( packet ), () => DateTime.UtcNow );
+                BlobHub.Enabled = true;
+            }
             // Only a host that advertises file synchronization is asked for its index; an older host gets the session as before.
             if (p.Features != null && p.Features.Contains( FileSyncLimits.Feature ))
             {

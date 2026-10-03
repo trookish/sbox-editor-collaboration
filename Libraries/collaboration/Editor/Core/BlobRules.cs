@@ -81,12 +81,12 @@ public static class BlobRules
     /// <paramref name="sink"/>. A value that would be externalized but decodes to more than 32 MiB stays inline and its path is added to
     /// <paramref name="refused"/>; the structural rules then refuse the object with a notice. Returns how many values were replaced.
     /// </summary>
-    public static int Externalize( JsonNode node, Action<string, byte[]> sink, List<string> refused )
+    public static int Externalize( JsonNode node, Action<string, byte[]> sink, List<string> refused, IReadOnlyDictionary<string, string> aliases = null )
     {
-        return Externalize( node, sink, refused, "" );
+        return Externalize( node, sink, refused, aliases, "" );
     }
 
-    private static int Externalize( JsonNode node, Action<string, byte[]> sink, List<string> refused, string path )
+    private static int Externalize( JsonNode node, Action<string, byte[]> sink, List<string> refused, IReadOnlyDictionary<string, string> aliases, string path )
     {
         int replaced = 0;
         if ( node is JsonObject obj )
@@ -95,14 +95,14 @@ public static class BlobRules
             {
                 JsonNode child = obj[key];
                 string childPath = path.Length == 0 ? key : path + "." + key;
-                if ( TryExternalize( child, sink, refused, childPath, out string placeholder ) )
+                if ( TryExternalize( child, sink, refused, aliases, childPath, out string placeholder ) )
                 {
                     obj[key] = JsonValue.Create( placeholder );
                     replaced++;
                 }
                 else
                 {
-                    replaced += Externalize( child, sink, refused, childPath );
+                    replaced += Externalize( child, sink, refused, aliases, childPath );
                 }
             }
         }
@@ -112,21 +112,24 @@ public static class BlobRules
             {
                 JsonNode child = array[i];
                 string childPath = path + "[" + i + "]";
-                if ( TryExternalize( child, sink, refused, childPath, out string placeholder ) )
+                if ( TryExternalize( child, sink, refused, aliases, childPath, out string placeholder ) )
                 {
                     array[i] = JsonValue.Create( placeholder );
                     replaced++;
                 }
                 else
                 {
-                    replaced += Externalize( child, sink, refused, childPath );
+                    replaced += Externalize( child, sink, refused, aliases, childPath );
                 }
             }
         }
         return replaced;
     }
 
-    private static bool TryExternalize( JsonNode node, Action<string, byte[]> sink, List<string> refused, string path, out string placeholder )
+    // `aliases` maps the hash of the engine's re-encoding of a mesh to the hash it was received as: the engine does not promise that
+    // loading a mesh and saving it again gives the same bytes, and without this an editor that applied a mesh would read its own
+    // re-encoding as a new edit and send it back, and the two editors would trade the same mesh forever.
+    private static bool TryExternalize( JsonNode node, Action<string, byte[]> sink, List<string> refused, IReadOnlyDictionary<string, string> aliases, string path, out string placeholder )
     {
         placeholder = null;
         if ( node is not JsonValue value || !value.TryGetValue( out string text ) || text.Length < BlobLimits.MinExternalChars ) return false;
@@ -139,7 +142,7 @@ public static class BlobRules
         byte[] bytes = Convert.FromBase64String( text );
         string hash = BlobStore.HashOf( bytes );
         sink( hash, bytes );
-        placeholder = Placeholder( hash );
+        placeholder = Placeholder( aliases != null && aliases.TryGetValue( hash, out string original ) ? original : hash );
         return true;
     }
 
