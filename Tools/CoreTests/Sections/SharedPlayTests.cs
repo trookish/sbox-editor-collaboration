@@ -15,5 +15,6 @@ static partial class SharedPlayTests
         Mirror( assert );
         Bandwidth( assert );
         Relay( assert );
+        Fence( assert );
     }
 }
