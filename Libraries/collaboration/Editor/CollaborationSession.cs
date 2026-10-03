@@ -358,6 +358,24 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
     // this session already reports to the person.
     private FileSyncClient projectFiles;
 
+    // The person's "Allow peers whose Steam identity could not be verified" choice for the session being joined; decides whether code from an unverified host may be received.
+    private bool guestAllowUnverified;
+
+    /// <summary>The guest's project file client, or null when not joined to a host that synchronizes files. The Code card reads its offer.</summary>
+    public FileSyncClient ProjectFiles => projectFiles;
+
+    /// <summary>The person agreed on the Code card: asks the host for exactly the offered files. False (nothing sent) when no offer is open or the host is not trusted.</summary>
+    public bool ReceiveHostCode()
+    {
+        return projectFiles != null && wire != null && projectFiles.ConsentToCode( packet => wire.Send( packet ) );
+    }
+
+    /// <summary>The person chose "Not now" on the Code card.</summary>
+    public void DeclineHostCode()
+    {
+        projectFiles?.DeclineCode();
+    }
+
     private string lastHostFileNotice;
 
     // The geometry channel of this editor's connection (null while the host does not advertise it). It serves what the host asks for, holds
@@ -981,6 +999,7 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
 
     public void Start(bool host, string address, int port, string name, string token, string steamId = null, string steamToken = null, bool allowUnverifiedPeers = false)
     {
+        guestAllowUnverified = allowUnverifiedPeers;
         StartCore(new StartPlan
         {
             Host = host,
@@ -1465,6 +1484,7 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
 
     public void StartFromInvite(string code, string name, string steamId = null, string steamToken = null, bool allowUnverifiedPeers = false, string advancedAddress = null, int advancedPort = 0)
     {
+        guestAllowUnverified = allowUnverifiedPeers;
         string text = CurrentProjectId();
         if (string.IsNullOrEmpty(text))
         {
@@ -1484,6 +1504,7 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
 
     public void StartFromDiscovery(DiscoveredHost host, string name, string steamId = null, string steamToken = null, bool allowUnverifiedPeers = false)
     {
+        guestAllowUnverified = allowUnverifiedPeers;
         if ((object)host == null)
         {
             throw new InvalidOperationException("Select a discovered host to join.");
@@ -3455,7 +3476,15 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
             // Only a host that advertises file synchronization is asked for its index; an older host gets the session as before.
             if (p.Features != null && p.Features.Contains( FileSyncLimits.Feature ))
             {
-                projectFiles = new FileSyncClient( Project.Current.RootDirectory.FullName ) { FileChanged = RefreshAsset };
+                // The welcome carries no verdict on the host's identity, so a guest cannot verify it: code from the host is received only when the person
+                // ticked "Allow peers whose Steam identity could not be verified" (fail closed). HostIdentityVerified stays false until a verdict exists.
+                projectFiles = new FileSyncClient( Project.Current.RootDirectory.FullName )
+                {
+                    FileChanged = RefreshAsset,
+                    HostHasCode = p.Features.Contains( CodeTransferLimits.Feature ),
+                    HostIdentityVerified = false,
+                    AllowUnverifiedHost = guestAllowUnverified
+                };
                 projectFiles.Begin( packet => wire.Send( packet ) );
             }
             // Shared play is opt-in on both sides: this computer chose it, and the host says it relays it. Otherwise nothing of it exists here.
