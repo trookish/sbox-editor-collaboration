@@ -48,7 +48,7 @@ public sealed record HostingDecision( HostingPhase Phase, HostingAction Action, 
 /// Why each rule exists (measured in Tools/TunnelSmoke): cloudflared prints its address before the name resolves, and trycloudflare.com tells resolvers
 /// to cache "no such name" for 60 s. A friend handed the address in that first second can be locked out by their own resolver for a minute, and so can
 /// the host's own check. So nothing is asked until cloudflared reports a registered edge connection and 5 s more have passed; then the public
-/// <c>/health</c> is probed every 3 s, for up to 75 s (longer than the negative cache), and only a real relay answer publishes the address.
+/// <c>/health</c> is probed every 3 s, for up to 150 s (well beyond the negative cache), and only a real relay answer publishes the address.
 ///
 /// After it was ready, a dead tunnel is withdrawn from the invite in the same pump (a code naming it would send friends nowhere) and restarted after
 /// 5, 15 and 45 s; each restart gets a NEW address, which is probed from scratch and republished. A failure before the first Ready is final instead:
@@ -62,7 +62,12 @@ public sealed class HostingPlan
 
     public const double ProbeIntervalSeconds = 3;
 
-    public const double ReachabilityWindowSeconds = 75;
+    /// <summary>
+    /// How long, after the first probe, the public address may stay unreachable before the plan gives up. The first probe's negative DNS answer is
+    /// cached for 60 s (trycloudflare.com), and a real run on the development machine needed 62 s of probing with the earlier 75 s cap; 150 s
+    /// leaves the same margin again for a slower resolver without hiding a tunnel that really is dead for much longer.
+    /// </summary>
+    public const double ReachabilityWindowSeconds = 150;
 
     /// <summary>cloudflared registers within a second or two of printing its address; an address with no edge connection after this is a failed start.</summary>
     public const double RegistrationTimeoutSeconds = 30;
@@ -82,6 +87,8 @@ public sealed class HostingPlan
     public static IReadOnlyList<int> LocalRelayPorts { get; } = new[] { 8443, 8080, 443, 80 };
 
     private const string LanStill = "Friends on your network can still join with the invite code.";
+
+    private const string LanAlready = "Friends on your network can already join.";
 
     private double addressAt = -1, registeredAt = -1, firstProbeAt, nextProbeAt, restartAt;
 
@@ -165,12 +172,19 @@ public sealed class HostingPlan
             : RelayProtocol.InviteRelayFor( effectiveRelayUrl, allowLoopback: soloHarness );
     }
 
-    /// <summary>What the dock says when hosting has no plan running. Only the person's own opt-out is new; every other case is <see cref="RelayDefaults.NoRelayNotice"/>.</summary>
-    public static string NoRelayNotice( string effectiveRelay, string configuredRelay, bool internetRelayEnabled )
+    /// <summary>
+    /// What the dock says when hosting has no running plan to report. With the internet relay on and nothing else naming a relay, hosting always has a
+    /// plan, so the answer is that plan's own status (<paramref name="planStatus"/>, failure sentence included), or a "preparing" sentence in the
+    /// moment before the plan exists: the older sentence that sends the person to a Cloudflare login is never shown on this path. The person's own
+    /// opt-out is said plainly; every other case is <see cref="RelayDefaults.NoRelayNotice"/>.
+    /// </summary>
+    public static string NoRelayNotice( string effectiveRelay, string configuredRelay, bool internetRelayEnabled, string planStatus = null )
     {
+        if ( Applies( effectiveRelay, configuredRelay, internetRelayEnabled ) )
+            return string.IsNullOrWhiteSpace( planStatus ) ? "Preparing the internet relay. " + LanAlready : planStatus;
         bool projectOff = string.Equals( configuredRelay?.Trim(), RelayDefaults.Off, StringComparison.OrdinalIgnoreCase );
         if ( !internetRelayEnabled && string.IsNullOrWhiteSpace( effectiveRelay ) && !projectOff )
-            return "The internet relay is turned off on this computer, so friends can join only from your network or through a port you forward. Turn it on in the Relay card and host again to let friends anywhere join.";
+            return "The internet relay is turned off on this computer. " + LanStill + " Turn it on in the Relay card and host again to let friends anywhere join.";
         return RelayDefaults.NoRelayNotice( effectiveRelay, configuredRelay );
     }
 

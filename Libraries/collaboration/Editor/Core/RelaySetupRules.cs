@@ -72,7 +72,7 @@ public enum RelaySetupMode
     Failed
 }
 
-public sealed record RelaySetupInput(string ProjectRelay, string LocalRelay, string BuiltInRelay, bool Working, string Progress, DeployResult LastResult);
+public sealed record RelaySetupInput(string ProjectRelay, string LocalRelay, string BuiltInRelay, bool Working, string Progress, DeployResult LastResult, bool InternetRelayEnabled = true);
 
 /// <summary>What the dock's relay card shows: one sentence, which buttons make sense, and whether the sentence reports a problem.</summary>
 public sealed record RelaySetupView(RelaySetupMode Mode, string Text, bool ShowOpen, bool ShowSetup, bool ShowCancel, bool IsProblem);
@@ -126,7 +126,19 @@ public static class RelaySetupRules
         {
             return new RelaySetupView(RelaySetupMode.Failed, input.LastResult.Error, true, true, false, true);
         }
-        string lead = input.LastResult != null && input.LastResult.Cancelled ? "Setup was cancelled, and no relay is set up. " : "No relay is set up, so friends on other networks cannot join. ";
+        // Reached only when the person opened the advanced option (the card shows its own automatic-relay sentence on the default path). The
+        // internet relay is on by default, so a relay of one's own is an alternative to it and not a missing piece.
+        string lead;
+        if (input.LastResult != null && input.LastResult.Cancelled)
+        {
+            lead = input.InternetRelayEnabled ? "Setup was cancelled. " : "The internet relay is turned off on this computer. Setup was cancelled. ";
+        }
+        else
+        {
+            lead = input.InternetRelayEnabled
+                ? "A relay of your own on Cloudflare is optional, because the internet relay starts automatically when you host. "
+                : "The internet relay is turned off on this computer. No relay of your own is set up either. ";
+        }
         return new RelaySetupView(RelaySetupMode.Missing, lead + ClipboardHint, true, true, false, false);
     }
 

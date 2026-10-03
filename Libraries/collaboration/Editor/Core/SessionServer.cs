@@ -158,7 +158,7 @@ public sealed partial class SessionServer : IDisposable
         Wire result;
         while (listener.Accepted.TryDequeue(out result))
         {
-            if (members.Count >= 16)
+            if (members.Count >= SessionLimits.MaxConnections)
             {
                 result.Dispose();
                 continue;
@@ -171,7 +171,7 @@ public sealed partial class SessionServer : IDisposable
         Wire relayed;
         while (Relay != null && Relay.Accepted.TryDequeue(out relayed))
         {
-            if (members.Count >= 16)
+            if (members.Count >= SessionLimits.MaxConnections)
             {
                 relayed.Dispose();
                 continue;
@@ -314,6 +314,12 @@ public sealed partial class SessionServer : IDisposable
                         Reject(m, text);
                         continue;
                     }
+                    text = ParticipantCapError(m, p.Peer);
+                    if (text != null)
+                    {
+                        Reject(m, text);
+                        continue;
+                    }
                     Member[] array2 = members.Where((Member x) => x != m && x.Peer == p.Peer).ToArray();
                     foreach (Member member in array2)
                     {
@@ -409,6 +415,14 @@ public sealed partial class SessionServer : IDisposable
         RejectWith(member, "reject", reason);
     }
 
+    // Counted at the moment of admission, not on arrival: an unproven socket is not a participant, and a guest reconnecting under the same peer id
+    // replaces its old connection (removed right after this check), so it is not counted twice. The host is one of the participants.
+    private string ParticipantCapError(Member joining, string peer)
+    {
+        int others = members.Count((Member x) => x != joining && x.Peer != null && x.Peer != peer);
+        return SessionLimits.AdmitGuest(others);
+    }
+
     private string AdmissionGateError(Packet hello)
     {
         if (this.peerFacts == null)
@@ -496,6 +510,10 @@ public sealed partial class SessionServer : IDisposable
                         else
                         {
                             string text = AdmissionGateError(pending.Hello);
+                            if (text == null)
+                            {
+                                text = ParticipantCapError(pending.Member, pending.Hello.Peer);
+                            }
                             if (text != null)
                             {
                                 Reject(pending.Member, text);

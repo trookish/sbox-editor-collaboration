@@ -32,7 +32,7 @@ Cloudflare bills incoming WebSocket messages at 20 to 1 against 100,000 requests
 
 Those are session-hours across **everyone** using the shared relay, and they are for two people; a session with more people costs more. If the free allowance is reached, Cloudflare refuses further messages until 00:00 UTC and sessions on the shared relay stop; the fix is the paid Workers plan (about $5 a month) or your own relay. **This has not been observed on a real deployment**; the figures come from a local run of the same Worker code.
 
-The Worker also caps a room at 16 guests, a message at 16 KiB, and a connection at 8 MB/s sustained. Set `RELAY_ACCESS_KEYS` (`wrangler secret put RELAY_ACCESS_KEYS`) if you want only hosts holding a key to be able to create rooms; the library reads the key from `.collaboration/relay-access-key.txt`.
+The Worker also caps a room at three guests (four participants with the host), a message at 16 KiB, and a connection at 8 MB/s sustained. Set `RELAY_ACCESS_KEYS` (`wrangler secret put RELAY_ACCESS_KEYS`) if you want only hosts holding a key to be able to create rooms; the library reads the key from `.collaboration/relay-access-key.txt`.
 
 ## Tests
 

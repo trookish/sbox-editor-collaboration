@@ -16,7 +16,7 @@ this editor's engine heals the one scene concerned, with one formal notice, and 
 | `Fail` 794 | Code hotload while an approved runtime is running | Integrity / lifecycle | Unchanged: fail-closed, recovery data archived. |
 | `Fail` 909, 915 | Start readiness cannot be evaluated or is refused | Admission | Unchanged: the start is refused with the readiness reason. |
 | `Fail` 1527 (`AbandonReconnect`) | Automatic reconnect gave up (identity, token or teardown) | Transport / identity | Unchanged. |
-| `Fail` 1707 (`ReportAction`) | A user action (save, undo, recover) threw something other than an `ActionRefusal` | External action | Unchanged; outside the frame/receive path. Listed as a gap below. |
+| `Fail` 1707 (`ReportAction`) | A user action (save, undo, redo, play toggle, a dock button) threw | External action | `ContentFailureRules.ClassifyActionFailure`: an ordinary failure (I/O, null reference, an invalid operation from `SceneAdapter`, an `ActionRefusal`) shows `The action could not be completed: <short reason>. The session continues.` and the session goes on. The integrity failures stay fail-closed: `CryptographicException`, `AuthenticationException`, `RelayRefusedException`, out of memory, also when wrapped in an aggregate or another exception. |
 | `Fail` 2226 (frame catch) | Everything thrown inside `Frame()` and `Receive` lands here | Depends on the throw | Each throw below is now classified at its source; only the integrity rows still reach this catch. |
 | `Fail` 2712 | `welcome` from a host whose session id changed during a reconnect | Identity | Unchanged: fail-closed; start a new session. |
 | `Fail` 2765 | `reject` with no scene (the host refused the session) | Admission | Unchanged. |
@@ -82,5 +82,5 @@ either is unsent (`ApplyRecovery.NeedsBackup`), and settings that cannot be read
   the scene pauses instead of resyncing.
 - After a failed apply of this editor's own rebased receipt, edits made while the scene resyncs are kept in the recovery copy written
   before the snapshot, not replayed.
-- `ReportAction` (line 1707) still ends the session for an unexpected exception from a user action.
+- `ReportAction` no longer ends the session for an ordinary exception from a user action. The classification is by exception type only; an integrity failure that surfaces as a plain `InvalidOperationException` or `IOException` from a user action would be shown as a notice, not end the session. The glue itself has not run in s&box.
 - The host side is unchanged: a client that resyncs sends the same `subscribe` it sends after a reconnect.

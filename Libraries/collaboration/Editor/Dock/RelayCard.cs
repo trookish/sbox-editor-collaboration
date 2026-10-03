@@ -106,7 +106,8 @@ public sealed class RelayCard : DockCard
         }
         if (advancedShown && defaultPath)
         {
-            text += " " + view.Text;
+            // With the internet relay off, the card's own sentence already says so; only the steps are added.
+            text += " " + (enabled.Value ? view.Text : RelaySetupRules.ClipboardHint);
         }
         // The login steps show only after the person asked for them, or while a setup they started is running or has failed.
         bool expanded = defaultPath ? advancedShown : view.Mode is RelaySetupMode.Working or RelaySetupMode.Failed;
