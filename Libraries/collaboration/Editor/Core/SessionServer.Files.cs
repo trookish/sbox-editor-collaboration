@@ -37,6 +37,9 @@ public sealed partial class SessionServer
 
         /// <summary>A put the host decided not to apply (a resend or content it already holds): its chunks are acknowledged and dropped.</summary>
         public Packet Discard;
+
+        /// <summary>The digests this member agreed to receive as code. Replaced (never extended) by each code-consent; empty until one arrives.</summary>
+        public HashSet<string> CodeConsent = new( StringComparer.OrdinalIgnoreCase );
     }
 
     private readonly Dictionary<Member, FileMemberState> fileMembers = new();
@@ -69,7 +72,7 @@ public sealed partial class SessionServer
 
     private bool HandleFilePacket( Member member, Packet packet )
     {
-        if ( packet.Kind is not ( "files-index" or "file-get" or "file-ack" or "file-put" or "file-chunk" or "file-delete" ) ) return false;
+        if ( packet.Kind is not ( "files-index" or "file-get" or "file-ack" or "file-put" or "file-chunk" or "file-delete" or "code-index" or "code-consent" ) ) return false;
         if ( string.IsNullOrEmpty( FileProjectRoot ) )
         {
             if ( packet.Kind != "file-ack" ) FileRefuse( member, "This host does not synchronize project files.", packet.Path );
@@ -84,6 +87,12 @@ public sealed partial class SessionServer
             {
             case "files-index":
                 SendIndex( member );
+                break;
+            case "code-index":
+                SendIndex( member, true );
+                break;
+            case "code-consent":
+                RecordConsent( state, packet );
                 break;
             case "file-ack":
                 state.Window.Release();
@@ -109,8 +118,18 @@ public sealed partial class SessionServer
         return true;
     }
 
-    private void SendIndex( Member member )
+    // The member's agreement to receive exactly these digests as code. It replaces any earlier one; a malformed or oversized list grants nothing.
+    private static void RecordConsent( FileMemberState state, Packet packet )
     {
+        state.CodeConsent = new HashSet<string>( StringComparer.OrdinalIgnoreCase );
+        var hashes = packet.Hashes;
+        if ( hashes == null || hashes.Count > CodeTransferLimits.MaxFiles || hashes.Any( x => !FileSyncReceiver.ValidHash( x ) ) ) return;
+        foreach ( string hash in hashes ) state.CodeConsent.Add( hash );
+    }
+
+    private void SendIndex( Member member, bool codeOnly = false )
+    {
+        string kind = codeOnly ? "code-index" : "files-index";
         List<FileIndexEntry> entries;
         try
         {
@@ -119,20 +138,21 @@ public sealed partial class SessionServer
         catch ( InvalidOperationException ex )
         {
             // Reported, never truncated: a partial index would make the guest believe the missing files do not exist.
-            member.Wire.Send( new Packet { Kind = "files-index", Final = true, Error = ex.Message } );
+            member.Wire.Send( new Packet { Kind = kind, Final = true, Error = ex.Message } );
             return;
         }
-        foreach ( var entry in entries ) fileAuthority.Seed( entry.Path, entry.Sha256 );
+        if ( codeOnly ) entries = entries.Where( x => CodeTransferRules.IsTransferable( x.Path ) ).ToList();
+        else foreach ( var entry in entries ) fileAuthority.Seed( entry.Path, entry.Sha256 );
         for ( int i = 0; i == 0 || i < entries.Count; i += FileSyncLimits.IndexPage )
         {
             bool final = i + FileSyncLimits.IndexPage >= entries.Count;
             member.Wire.Send( new Packet
             {
-                Kind = "files-index",
+                Kind = kind,
                 FileEntries = entries.Skip( i ).Take( FileSyncLimits.IndexPage ).ToList(),
                 Final = final,
                 // Only the names, only on the last page: the project file is Code and is never sent, but the guest can say what it lacks.
-                Packages = final ? HostPackages() : null
+                Packages = final && !codeOnly ? HostPackages() : null
             } );
         }
     }
@@ -152,7 +172,16 @@ public sealed partial class SessionServer
 
     private void QueueFile( Member member, FileMemberState state, Packet packet )
     {
-        if ( !FileSyncReceiver.ValidPath( FileProjectRoot, packet.Path, out string target, out string error ) )
+        // The kind is decided here from the path alone, never from anything the member sent: a path that is not an asset is code and
+        // is served only for a digest this member agreed to, and never from Libraries, Git, build output or the library's own folder.
+        bool code = !string.IsNullOrWhiteSpace( packet.Path ) && JoinReadiness.Classify( packet.Path ) != ProjectFileKind.Asset;
+        var kind = code ? FileTransferKind.Code : FileTransferKind.Asset;
+        if ( code && ( !FileSyncReceiver.ValidHash( packet.Sha256 ) || !state.CodeConsent.Contains( packet.Sha256 ) ) && CodeTransferRules.IsTransferable( packet.Path ) )
+        {
+            FileRefuse( member, $"The file \"{FileJoinPlan.Bounded( packet.Path )}\" is code and is sent only to a member who agreed to receive it; no agreement covers it.", packet.Path );
+            return;
+        }
+        if ( !FileSyncReceiver.ValidPath( FileProjectRoot, packet.Path, kind, out string target, out string error ) )
         {
             FileRefuse( member, error, packet.Path );
             return;
@@ -163,9 +192,9 @@ public sealed partial class SessionServer
             FileRefuse( member, $"The file \"{packet.Path}\" no longer exists on the host.", packet.Path );
             return;
         }
-        if ( entry.Size > FileSyncLimits.MaxFileSize )
+        if ( entry.Size > ( code ? CodeTransferLimits.MaxFileBytes : FileSyncLimits.MaxFileSize ) )
         {
-            FileRefuse( member, FileJoinPlan.TooLarge( packet.Path ), packet.Path );
+            FileRefuse( member, code ? $"The code file \"{FileJoinPlan.Bounded( packet.Path )}\" is larger than 4 MiB and is not sent." : FileJoinPlan.TooLarge( packet.Path ), packet.Path );
             return;
         }
         if ( !string.Equals( entry.Sha256, packet.Sha256, StringComparison.OrdinalIgnoreCase ) )

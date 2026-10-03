@@ -100,6 +100,8 @@ public sealed class CollaborationDock : Widget
 
     private ReadinessCard readiness;
 
+    private CodeCard code;
+
     private ConnectCard connect;
 
     private RelayCard relay;
@@ -148,10 +150,10 @@ public sealed class CollaborationDock : Widget
 
     private ContentCanvas content => pages.TryGetValue(selectedTab, out ContentCanvas value) ? value : null;
 
-    private bool Built => statusDetail != null && setupBanner != null && undoHint != null && readiness != null && connect != null && relay != null && changes != null && orgRoster != null && sessionRoster != null && controls != null && soloTest != null
+    private bool Built => statusDetail != null && setupBanner != null && undoHint != null && readiness != null && code != null && connect != null && relay != null && changes != null && orgRoster != null && sessionRoster != null && controls != null && soloTest != null
         && aboutToggle != null && aboutBody != null && tabs != null && scrollers.Count == DockSectionRules.All.Length && pages.Count == DockSectionRules.All.Length
         && DockSectionRules.All.All(tab => scrollers[tab] != null && scrollers[tab].Canvas == pages[tab])
-        && readiness.Complete && connect.Complete && relay.Complete && changes.Complete && orgRoster.Complete && sessionRoster.Complete && controls.Complete && soloTest.Complete;
+        && readiness.Complete && code.Complete && connect.Complete && relay.Complete && changes.Complete && orgRoster.Complete && sessionRoster.Complete && controls.Complete && soloTest.Complete;
 
     public CollaborationDock(Widget parent)
         : base(parent)
@@ -212,6 +214,7 @@ public sealed class CollaborationDock : Widget
         connect = session.Add(new ConnectCard(pages[DockTab.Session]));
         controls = session.Add(new ControlsCard(pages[DockTab.Session], connect));
         changes = session.Add(new ChangesCard(pages[DockTab.Session]));
+        code = session.Add(new CodeCard(pages[DockTab.Session]));
         undoHint = session.Add(new Editor.Label("While connected, use collaboration Undo: each commit clears the native undo history and leaves one Collaboration Undo entry, so Ctrl+Z acts on your most recent collaboration operation only.", pages[DockTab.Session])
         {
             WordWrap = true,
@@ -414,6 +417,7 @@ public sealed class CollaborationDock : Widget
         orgRoster.Refresh();
         sessionRoster.Refresh();
         controls.Refresh();
+        code.Refresh();
         soloTest?.Refresh();
         RefreshSections(current);
     }
@@ -653,6 +657,7 @@ public sealed class CollaborationDock : Widget
         yield return (Name: "connect", Card: connect);
         yield return (Name: "controls", Card: controls);
         yield return (Name: "changes", Card: changes);
+        yield return (Name: "code", Card: code);
         yield return (Name: "sessionRoster", Card: sessionRoster);
         yield return (Name: "orgRoster", Card: orgRoster);
         yield return (Name: "readiness", Card: readiness);
@@ -667,6 +672,7 @@ public sealed class CollaborationDock : Widget
             case "connect":
             case "controls":
             case "changes":
+            case "code":
                 return DockTab.Session;
             case "sessionRoster":
             case "orgRoster":

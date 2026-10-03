@@ -37,6 +37,31 @@ public sealed class FileSyncClient : IDisposable
 
     private readonly FileChunkWindow uploadWindow = new();
 
+    // Consented code, queued only by ConsentToCode and fetched only after every asset (assets are the join; code is the person's choice).
+    private readonly LinkedList<FileIndexEntry> codeFetches = new();
+
+    private readonly List<FileIndexEntry> codeRemote = new();
+
+    private readonly List<string> codeRecoveries = new();
+
+    private readonly HashSet<string> codeFailedHashes = new( StringComparer.OrdinalIgnoreCase );
+
+    private CodeOffer offer;
+
+    private string seenFingerprint;
+
+    private string declinedFingerprint;
+
+    private bool codeIndexPending;
+
+    private DateTime nextCodePoll = DateTime.MinValue;
+
+    private int codeExpected;
+
+    private int codeDone;
+
+    private int codeFailed;
+
     private FileChunkAssembler fetching;
 
     private UploadJob uploading;
@@ -91,6 +116,57 @@ public sealed class FileSyncClient : IDisposable
 
     /// <summary>The session's change log; every project file this client writes, deletes or sends is recorded in it. Null records nothing.</summary>
     public SessionChangeLog Changes { get; set; }
+    /// <summary>The host's display name, for the code card and its notices. Null reads as "the host".</summary>
+    public string HostName { get; set; }
+
+    /// <summary>
+    /// Whether the host's identity is verified. Fail closed: false until the session can say otherwise. The only evidence a guest could hold
+    /// is a verdict on the host's Steam identity; the session reports it here.
+    /// </summary>
+    public bool HostIdentityVerified { get; set; }
+
+    /// <summary>The person's existing setting "Allow peers whose Steam identity could not be verified".</summary>
+    public bool AllowUnverifiedHost { get; set; }
+
+    /// <summary>True when the host advertised <see cref="CodeTransferLimits.Feature"/>. Without it no code message is ever sent and the former notice is shown.</summary>
+    public bool HostHasCode { get; set; }
+
+    /// <summary>How often a joined client asks the host for its code listing, to notice that the host's code changed after the person decided. Zero asks every poll.</summary>
+    public TimeSpan CodePollInterval { get; set; } = TimeSpan.FromSeconds( 15 );
+
+    public bool CodeTrusted => CodeTrust.Permits( HostIdentityVerified, AllowUnverifiedHost );
+
+    public CodeTransferState CodeState { get; private set; }
+
+    /// <summary>The offer the person should see (also one that only reports what the limits left out), or null while there is none, while receiving, and after "Not now".</summary>
+    public CodeOffer Offer => CodeState is CodeTransferState.Receiving or CodeTransferState.Received or CodeTransferState.Declined ? null : offer;
+
+    /// <summary>
+    /// The person agrees to exactly the files of the current offer. Refused (false, nothing sent) unless an offer with files is shown, the host
+    /// can transfer code, and the host is trusted. Sends one code-consent naming the offered hashes; the files are then fetched like assets.
+    /// </summary>
+    public bool ConsentToCode( Action<Packet> send )
+    {
+        if ( !HostHasCode || !CodeTrusted || CodeState != CodeTransferState.Offered || offer == null || !offer.CanOffer ) return false;
+        send( new Packet { Kind = "code-consent", Hashes = offer.Hashes.ToList() } );
+        codeRecoveries.Clear();
+        codeFailedHashes.Clear();
+        codeDone = 0;
+        codeFailed = 0;
+        codeExpected = offer.Files.Count;
+        foreach ( var file in offer.Files ) codeFetches.AddLast( new FileIndexEntry( file.Path, file.Sha256, file.Size ) { Kind = FileTransferKind.Code } );
+        CodeState = CodeTransferState.Receiving;
+        return true;
+    }
+
+    /// <summary>"Not now": the shown set is hidden; a different set (the host changed its code) is offered again.</summary>
+    public void DeclineCode()
+    {
+        if ( CodeState != CodeTransferState.Offered || offer == null ) return;
+        declinedFingerprint = offer.Fingerprint;
+        offer = null;
+        CodeState = CodeTransferState.Declined;
+    }
 
     /// <summary>True once the files a join needed have arrived (or been refused); scene subscription waits for it.</summary>
     public bool JoinReady { get; private set; }
@@ -127,6 +203,9 @@ public sealed class FileSyncClient : IDisposable
         case "files-index":
             ReceiveIndex( p, openScenes );
             return true;
+        case "code-index":
+            ReceiveCodeIndex( p );
+            return true;
         case "file-chunk":
             ReceiveChunk( p, send );
             return true;
@@ -154,7 +233,96 @@ public sealed class FileSyncClient : IDisposable
         SendUploadChunks( send );
         StartNextFetch( send );
         if ( !JoinReady || Disabled ) return;
+        PollCode( send );
         Scan( send, openScenes );
+    }
+
+    // Asks the host for its code listing now and then, so a change the host makes after the person decided produces a new offer. Only while
+    // idle: nothing is compared while a consented set is being received, and one request is in flight at a time.
+    private void PollCode( Action<Packet> send )
+    {
+        if ( !HostHasCode || codeIndexPending || CodeState == CodeTransferState.Receiving || DateTime.UtcNow < nextCodePoll ) return;
+        codeIndexPending = true;
+        codeRemote.Clear();
+        send( new Packet { Kind = "code-index" } );
+    }
+
+    private void ReceiveCodeIndex( Packet p )
+    {
+        if ( !codeIndexPending ) return;
+        if ( p.Error != null )
+        {
+            codeIndexPending = false;
+            nextCodePoll = DateTime.UtcNow + CodePollInterval;
+            Notify( p.Error );
+            return;
+        }
+        if ( p.FileEntries != null ) codeRemote.AddRange( p.FileEntries.Where( x => x != null ) );
+        if ( codeRemote.Count > FileSyncLimits.MaxEntries )
+        {
+            codeRemote.Clear();
+            codeIndexPending = false;
+            nextCodePoll = DateTime.UtcNow + CodePollInterval;
+            Notify( $"The host listed more than {FileSyncLimits.MaxEntries} code files; the code listing was not used." );
+            return;
+        }
+        if ( !p.Final ) return;
+        codeIndexPending = false;
+        nextCodePoll = DateTime.UtcNow + CodePollInterval;
+        var entries = codeRemote.ToList();
+        codeRemote.Clear();
+        UpdateOffer( entries );
+    }
+
+    // This machine's own transferable code, read from disk (cached by size and time), never the whole project: the offer compares code only.
+    private List<FileIndexEntry> LocalCodeEntries()
+    {
+        var entries = new List<FileIndexEntry>();
+        foreach ( string path in index.Paths() )
+        {
+            if ( !CodeTransferRules.IsTransferable( path ) ) continue;
+            var entry = index.Entry( path );
+            if ( entry != null ) entries.Add( entry );
+        }
+        return entries;
+    }
+
+    /// <summary>
+    /// Compares the host's code listing with this machine's and shows, replaces or withdraws the offer. A set the person declined stays hidden;
+    /// a set that differs from the one last shown is offered afresh with a change notice; a set being received is left alone until it is done.
+    /// </summary>
+    private void UpdateOffer( IReadOnlyList<FileIndexEntry> hostEntries )
+    {
+        if ( CodeState == CodeTransferState.Receiving ) return;
+        List<FileIndexEntry> local;
+        try
+        {
+            local = LocalCodeEntries();
+        }
+        catch ( InvalidOperationException )
+        {
+            // Too many files to enumerate: the asset path has already stopped and said so; no offer is built from a listing that cannot be trusted complete.
+            return;
+        }
+        var next = CodeOffer.Build( hostEntries, local );
+        if ( next == null )
+        {
+            offer = null;
+            if ( CodeState is CodeTransferState.Offered or CodeTransferState.Declined ) CodeState = CodeTransferState.None;
+            return;
+        }
+        if ( CodeState == CodeTransferState.Declined && next.Fingerprint == declinedFingerprint ) return;
+        if ( offer != null && offer.Fingerprint == next.Fingerprint && offer.ExcessNotice == next.ExcessNotice && CodeState is CodeTransferState.Offered or CodeTransferState.None ) return;
+        // "Changed" only when the person already saw a different set; files left over from a partly failed receive are not a change on the host.
+        if ( seenFingerprint != null && seenFingerprint != next.Fingerprint && next.CanOffer && !next.Files.All( x => codeFailedHashes.Contains( x.Sha256 ) ) )
+        {
+            next.ChangeNotice = CodeOfferText.ChangedNotice( HostName, next.Files.Count );
+        }
+        seenFingerprint = next.Fingerprint;
+        offer = next;
+        CodeState = next.CanOffer ? CodeTransferState.Offered : CodeTransferState.None;
+        foreach ( string notice in next.Rejected ) Notify( notice );
+        if ( next.ExcessNotice != null ) Notify( next.ExcessNotice );
     }
 
     private void ReceiveIndex( Packet p, IEnumerable<string> openScenes )
@@ -183,7 +351,10 @@ public sealed class FileSyncClient : IDisposable
             return;
         }
         var plan = FileJoinPlan.Plan( remote, local, openScenes );
-        if ( plan.CodeNotice != null ) Notify( plan.CodeNotice );
+        // A host that can transfer code gets an offer (shown on the code card); an older one gets the former notice, since nothing else can be done.
+        if ( HostHasCode ) UpdateOffer( remote.ToList() );
+        else if ( plan.CodeNotice != null ) Notify( plan.CodeNotice );
+        nextCodePoll = DateTime.UtcNow + CodePollInterval;
         foreach ( string notice in plan.Notices ) Notify( notice );
         // Reported once, never installed: the packages are the person's to add, and the project file is not transferred.
         if ( p.Packages != null )
@@ -223,18 +394,21 @@ public sealed class FileSyncClient : IDisposable
 
     private void StartNextFetch( Action<Packet> send )
     {
-        while ( fetching == null && fetches.Count > 0 )
+        while ( fetching == null && ( fetches.Count > 0 || codeFetches.Count > 0 ) )
         {
-            var entry = fetches.First.Value;
-            fetches.RemoveFirst();
+            // Assets first: they are the join. Code is fetched only once none is left, and only because the person agreed.
+            var list = fetches.Count > 0 ? fetches : codeFetches;
+            var entry = list.First.Value;
+            list.RemoveFirst();
             try
             {
-                fetching = new FileChunkAssembler( root, entry.Path, entry.Sha256, entry.Size );
+                fetching = new FileChunkAssembler( root, entry.Path, entry.Sha256, entry.Size, null, entry.Kind );
             }
             catch ( Exception ex ) when ( ex is IOException or UnauthorizedAccessException or InvalidOperationException )
             {
                 Notify( $"The file \"{entry.Path}\" could not be received: {ex.Message}" );
-                Count( entry.Size );
+                if ( entry.Kind == FileTransferKind.Code ) CodeFileFinished( entry, false, null );
+                else Count( entry.Size );
                 continue;
             }
             if ( fetching.IsComplete )
@@ -245,7 +419,8 @@ public sealed class FileSyncClient : IDisposable
             }
             send( new Packet { Kind = "file-get", Path = entry.Path, Sha256 = entry.Sha256 } );
         }
-        if ( fetching == null && fetches.Count == 0 && !JoinReady && planned > 0 ) JoinReady = true;
+        bool assetBusy = fetches.Count > 0 || fetching != null && fetching.Kind == FileTransferKind.Asset;
+        if ( !assetBusy && !JoinReady && planned > 0 ) JoinReady = true;
     }
 
     private void ReceiveChunk( Packet p, Action<Packet> send )
@@ -270,10 +445,35 @@ public sealed class FileSyncClient : IDisposable
     {
         var assembler = fetching;
         fetching = null;
-        var entry = new FileIndexEntry( assembler.Path, assembler.Sha256, assembler.Total );
-        string error = complete ? assembler.Complete( receiver, out _ ) : "incomplete";
+        bool isCode = assembler.Kind == FileTransferKind.Code;
+        var entry = new FileIndexEntry( assembler.Path, assembler.Sha256, assembler.Total ) { Kind = assembler.Kind };
+        string recovered = null;
+        string error = complete ? assembler.Complete( receiver, out recovered ) : "incomplete";
         assembler.Dispose();
         finishedBytes -= assembler.Received;
+        if ( isCode )
+        {
+            // Code never enters `known` (the upload scan ignores code, and a known code file would be reported deleted) and is never uploaded.
+            if ( error == null )
+            {
+                index.Invalidate( entry.Path );
+                failures.Remove( entry.Path );
+                CodeFileFinished( entry, true, recovered );
+                FileChanged?.Invoke( entry.Path );
+                return;
+            }
+            bool binary = error == FileSyncReceiver.BinaryRefusal( entry.Path );
+            int tries = failures.GetValueOrDefault( entry.Path ) + 1;
+            failures[entry.Path] = tries;
+            if ( tries <= 1 && complete && !binary )
+            {
+                codeFetches.AddFirst( entry );
+                return;
+            }
+            Notify( binary ? error : complete ? $"The file \"{entry.Path}\" failed SHA-256 verification twice and was not applied." : error );
+            CodeFileFinished( entry, false, null );
+            return;
+        }
         if ( error == null )
         {
             index.Invalidate( entry.Path );
@@ -293,6 +493,44 @@ public sealed class FileSyncClient : IDisposable
         }
         if ( complete ) Notify( $"The file \"{entry.Path}\" failed SHA-256 verification twice and was not applied." );
         Count( entry.Size );
+    }
+
+    // One consented file is finished (written or refused). When the last one is, the person is told once and the offer is re-evaluated on the next listing.
+    private void CodeFileFinished( FileIndexEntry entry, bool ok, string recovery )
+    {
+        if ( ok ) codeDone++;
+        else
+        {
+            codeFailed++;
+            codeFailedHashes.Add( entry.Sha256 );
+        }
+        if ( recovery != null )
+        {
+            // The recovery path is a file inside a dated folder; the person is told the folder.
+            string folder = RecoveryFolder( recovery );
+            if ( folder != null && !codeRecoveries.Contains( folder ) ) codeRecoveries.Add( folder );
+        }
+        if ( codeDone + codeFailed < codeExpected ) return;
+        string recoveryText = codeRecoveries.Count == 0 ? null : string.Join( ", ", codeRecoveries );
+        Notify( CodeOfferText.ReceivedNotice( codeDone, codeExpected, recoveryText ) );
+        codeExpected = 0;
+        offer = null;
+        CodeState = CodeTransferState.Received;
+        // The next listing decides whether anything is left to offer (a file that was refused is, and is shown again as new or differing).
+        declinedFingerprint = null;
+        nextCodePoll = DateTime.MinValue;
+        codeDone = 0;
+        codeFailed = 0;
+    }
+
+    private static string RecoveryFolder( string recovery )
+    {
+        string text = recovery.Replace( '\\', '/' );
+        int at = text.IndexOf( ".collaboration/recovery/", StringComparison.Ordinal );
+        if ( at < 0 ) return null;
+        string rest = text.Substring( at + ".collaboration/recovery/".Length );
+        int slash = rest.IndexOf( '/' );
+        return ".collaboration/recovery/" + ( slash < 0 ? rest : rest.Substring( 0, slash ) );
     }
 
     private void Count( long size )
