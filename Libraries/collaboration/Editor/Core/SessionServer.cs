@@ -245,6 +245,7 @@ public sealed partial class SessionServer : IDisposable
                     p.Peer = m.Peer;
                     if (HandleFilePacket(m, p)) continue;
                     if (HandlePlayPacket(m, p)) continue;
+                    if (HandleTransientPacket(m, p)) continue;
                     switch (p.Kind)
                     {
                     case "subscribe":
@@ -631,6 +632,7 @@ public sealed partial class SessionServer : IDisposable
     {
         // File and geometry features come from WelcomeFeatures (SessionServer.Blobs.cs).
         var features = WelcomeFeatures() ?? new List<string>();
+        features.Add(TransientLimits.Feature);
         if (SharedPlayEnabled)
         {
             features.Add(PlayRelayPolicy.Feature);
