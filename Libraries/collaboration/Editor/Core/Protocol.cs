@@ -40,6 +40,14 @@ public sealed class Packet
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public long Total { get; set; }
 
+    /// <summary>
+    /// On blob-need: the SHA-256 digests (lowercase hex) of the mesh geometry the sender is missing, at most BlobLimits.MaxHashesPerRequest.
+    /// Untrusted: only exactly 64 lowercase hex digits are ever looked up. Chunks of that geometry travel as blob-data, reusing Sha256, Offset,
+    /// Total and Data; blob-ack returns a chunk's window credit. All additive and omitted when unset (see BlobExchange).
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<string> Hashes { get; set; }
+
     /// <summary>One chunk of file content (base64 on the wire, at most FileSyncLimits.ChunkSize bytes before encoding).</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public byte[] Data { get; set; }
@@ -580,6 +588,12 @@ public static class StateRules
         }
         if ( node is JsonValue value && value.TryGetValue( out string text ) && System.Text.Encoding.UTF8.GetByteCount( text ) > MaxStringBytes )
         {
+            // Geometry is moved out of the state before it gets here (BlobRules.Externalize); what is still inline is over the 32 MiB
+            // limit, and the person is told that, not that "a text value" is too long.
+            if ( BlobRules.IsCanonicalBase64( text ) && text.Length / 4 * 3 > BlobLimits.MaxBlobBytes )
+            {
+                return "has geometry larger than the " + BlobLimits.MaxBlobBytes / ( 1024 * 1024 ) + " MiB collaboration limit and was not sent.";
+            }
             return "contains a text value larger than the " + MaxStringBytes / 1024 + " KiB collaboration limit and was not sent.";
         }
         return null;

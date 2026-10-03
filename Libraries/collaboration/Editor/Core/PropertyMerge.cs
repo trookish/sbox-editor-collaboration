@@ -109,7 +109,9 @@ public static class PropertyMerge
             }
             if ( !( inTarget == inBefore && StateRules.ValuesEqual( targetValue, beforeValue ) ) )
             {
-                AddClash( found, prefix + FieldName( prefix, key ) );
+                // A mesh is edited as one unit and travels as a hash: the person knows it as the geometry, not as a property path.
+                bool geometry = BlobRules.ContainsPlaceholder( targetValue ) || BlobRules.ContainsPlaceholder( afterValue );
+                AddClash( found, geometry ? BlobRules.ClashName : prefix + FieldName( prefix, key ) );
             }
             if ( inAfter )
             {

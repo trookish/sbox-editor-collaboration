@@ -252,12 +252,22 @@ public sealed class FileChunkAssembler : IDisposable
 
     public bool IsComplete => Received == Total;
 
+    /// <summary>
+    /// The shape rule for one chunk of a transfer of <paramref name="total"/> bytes: it starts on a chunk boundary, lies within the declared size
+    /// and is a whole chunk unless it is the last. Shared with <see cref="BlobExchange"/>, which assembles geometry in memory by the same rule.
+    /// </summary>
+    public static bool IsValidChunk( long total, long offset, int length )
+    {
+        if ( offset < 0 || offset > total || length > FileSyncLimits.ChunkSize || length > total - offset ) return false;
+        if ( offset % FileSyncLimits.ChunkSize != 0 ) return false;
+        if ( length != FileSyncLimits.ChunkSize && offset + length != total ) return false;
+        return true;
+    }
+
     public bool Add( long offset, byte[] data )
     {
         data ??= Array.Empty<byte>();
-        if ( offset < 0 || offset > Total || data.Length > FileSyncLimits.ChunkSize || data.LongLength > Total - offset ) return false;
-        if ( offset % FileSyncLimits.ChunkSize != 0 ) return false;
-        if ( data.Length != FileSyncLimits.ChunkSize && offset + data.Length != Total ) return false;
+        if ( !IsValidChunk( Total, offset, data.Length ) ) return false;
         if ( !received.Add( offset ) ) return true;
         using ( var file = new FileStream( part, FileMode.Open, FileAccess.Write, FileShare.None ) )
         {
