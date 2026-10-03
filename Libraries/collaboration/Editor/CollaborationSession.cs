@@ -146,6 +146,27 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
 
     private RelayHost relayHost;
 
+    // The one-click internet relay (Core/HostingPlan.cs), used only when no relay is named anywhere: the loopback relay this host runs, the Quick Tunnel
+    // that exposes it, and the reachability probe in flight. All of it is polled from PollConnectivity and released with the rest of the connectivity.
+    private HostingPlan hostingPlan;
+
+    private EmbeddedRelay embeddedRelay;
+
+    private string embeddedRelayError;
+
+    private CloudflaredTool quickTunnel;
+
+    private Task<string> reachabilityTask;
+
+    private CancellationTokenSource reachabilityCancel;
+
+    // The public address the invite carries while the plan is Ready, and null otherwise; the invite never falls back to the loopback address.
+    private string publicRelayUrl;
+
+    private static readonly TimeSpan ReachabilityProbeTimeout = TimeSpan.FromSeconds(5L);
+
+    private static double HostingSeconds => Environment.TickCount64 / 1000.0;
+
     private bool soloHarness;
 
     private readonly HeldPacketBuffer heldPackets = new HeldPacketBuffer();
@@ -412,11 +433,15 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
         }
     }
 
-    /// <summary>The host's relay registration, worded for the dock. Null when no relay is configured.</summary>
+    /// <summary>The host's relay registration, worded for the dock: the internet relay's progress when the host runs its own, else the configured relay's. Null when there is none.</summary>
     public string RelayStatus
     {
         get
         {
+            if (hostingPlan != null)
+            {
+                return hostingPlan.Status;
+            }
             RelayHost host = relayHost;
             if (host == null || host.State == RelayHostState.Stopped || host.State == RelayHostState.Idle)
             {
@@ -436,8 +461,13 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
 
     public bool RelayFailed => relayHost?.State == RelayHostState.Failed;
 
+    /// <summary>True while the internet relay has failed or is restarting, so the dock can colour its sentence as a problem.</summary>
+    public bool InternetRelayTrouble => hostingPlan != null && (hostingPlan.Phase == HostingPhase.Failed || hostingPlan.Phase == HostingPhase.Degraded);
+
     /// <summary>Set while hosting with no relay a friend elsewhere could reach, so the dock can say so instead of leaving a silent gap. Null otherwise.</summary>
-    public string NoRelayNotice => IsHost && (relayHost == null || relayHost.State == RelayHostState.Stopped) ? RelayDefaults.NoRelayNotice(EffectiveRelayUrl(), sessionConfig?.RelayUrl) : null;
+    public string NoRelayNotice => IsHost && hostingPlan == null && (relayHost == null || relayHost.State == RelayHostState.Stopped)
+        ? HostingPlan.NoRelayNotice(effectiveRelay: EffectiveRelayUrl(), configuredRelay: sessionConfig?.RelayUrl, internetRelayEnabled: RelaySetup.InternetRelayEnabled)
+        : null;
 
     /// <summary>What source synchronization is doing this frame; the dock reads it to explain a pause.</summary>
     public PlaySpectateDecision PlayDecision { get; private set; }
@@ -1152,11 +1182,20 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
     private void StartRelayHost(StartPlan plan, int port)
     {
         string relayUrl = EffectiveRelayUrl();
+        // No relay named by the project or this computer, and nobody opted out: the host runs the relay itself and exposes it through an account-free
+        // Quick Tunnel. Its own RelayHost dials the loopback relay now; the invite gains the public address only when the plan has seen it answer.
+        if (HostingPlan.Applies(effectiveRelay: relayUrl, configuredRelay: sessionConfig?.RelayUrl, internetRelayEnabled: RelaySetup.InternetRelayEnabled))
+        {
+            hostingPlan = new HostingPlan();
+            HostingDecision first = hostingPlan.Pump(HostingInputsNow(probeResult: null));
+            relayUrl = first.Action == HostingAction.StartRelay ? StartEmbeddedRelay() : null;
+        }
         if (string.IsNullOrWhiteSpace(relayUrl) || plan.Secret == null || plan.SessionKey == null)
         {
             return;
         }
-        string accessKey = ReadRelayAccessKey();
+        // The embedded relay is this host's own and takes no access key; the room's proofs, derived from the invite secret, keep strangers out of it.
+        string accessKey = embeddedRelay != null ? null : ReadRelayAccessKey();
         try
         {
             relayHost = new RelayHost(() => new SandboxRelaySocket(), relayUrl, plan.Secret, plan.SessionKey, accessKey);
@@ -1165,7 +1204,8 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                 server.Relay = relayHost;
             }
             relayHost.Start();
-            inviteCarriesRelay = true;
+            // A configured relay goes into the invite at once, as it always has; the embedded one only when the plan publishes its public address.
+            inviteCarriesRelay = embeddedRelay == null;
             inviteCodeValue = BuildInviteCode(port);
         }
         catch (Exception error)
@@ -1173,8 +1213,61 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
             relayHost?.Dispose();
             relayHost = null;
             inviteCarriesRelay = false;
+            if (embeddedRelay != null)
+            {
+                embeddedRelayError = "The host could not connect to its own local relay.";
+            }
             GlobalGameNamespace.Log.Error("Collaboration relay: " + CollaborationTransportDiagnostics.BoundedExceptionDiagnostic(string.Empty, error));
         }
+    }
+
+    // Takes the first loopback port the engine lets the host's own WebSocket dial (HostingPlan.LocalRelayPorts). A free port picked by the system would
+    // be refused by the engine's ws:// policy, so the choice is limited to those four. Returns the local relay address, or null with embeddedRelayError
+    // set for the plan to report on its next pump.
+    private string StartEmbeddedRelay()
+    {
+        foreach (int candidate in HostingPlan.LocalRelayPorts)
+        {
+            EmbeddedRelay relay = new EmbeddedRelay(candidate);
+            try
+            {
+                relay.Start();
+                embeddedRelay = relay;
+                return HostingPlan.LocalRelayUrl(candidate);
+            }
+            catch (InvalidOperationException)
+            {
+                relay.Dispose();
+            }
+        }
+        embeddedRelayError = "The local relay could not listen on any of the ports the editor permits (" + string.Join(", ", HostingPlan.LocalRelayPorts) + "); close the program that uses them and host again.";
+        return null;
+    }
+
+    private HostingInputs HostingInputsNow(string probeResult)
+    {
+        CloudflaredTool tunnel = quickTunnel;
+        string relayError = embeddedRelayError;
+        if (relayError == null && embeddedRelay != null && !embeddedRelay.IsListening)
+        {
+            relayError = "The local relay stopped listening.";
+        }
+        if (relayError == null && embeddedRelay != null && relayHost?.State == RelayHostState.Failed)
+        {
+            relayError = "The host's connection to its own local relay failed: " + relayHost.Failure;
+        }
+        bool running = tunnel?.State == CloudflaredTool.Phase.Running;
+        return new HostingInputs(
+            Now: HostingSeconds,
+            RelayStarted: embeddedRelay?.IsListening == true,
+            RelayError: relayError,
+            LocalHostReady: relayHost?.State == RelayHostState.Ready,
+            TunnelRunning: running,
+            TunnelRelayUrl: running ? tunnel.RelayUrl : null,
+            TunnelRegistered: tunnel?.RegisteredConnectionSeen == true,
+            TunnelError: tunnel?.State == CloudflaredTool.Phase.Failed ? (tunnel.Error ?? "The tunnel stopped.") : null,
+            TunnelProgress: tunnel?.State == CloudflaredTool.Phase.Downloading ? tunnel.Status : null,
+            ProbeResult: probeResult);
     }
 
     // The access key is a credential, so it comes from an untracked local file and never from the shared,
@@ -1211,7 +1304,7 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
             ProjectId = sessionConfig.ProjectId,
             Secret = hostSecret,
             Endpoints = EndpointsFor(stun?.PublicEndPoint),
-            Relay = inviteCarriesRelay ? RelayProtocol.InviteRelayFor(EffectiveRelayUrl(), allowLoopback: soloHarness) : null
+            Relay = HostingPlan.InviteRelay(inviteCarriesRelay: inviteCarriesRelay, embeddedRelayInUse: embeddedRelay != null, publicRelayUrl: publicRelayUrl, effectiveRelayUrl: EffectiveRelayUrl(), soloHarness: soloHarness)
         });
     }
 
@@ -1365,6 +1458,7 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
 
     private void PollConnectivity()
     {
+        PollInternetHosting();
         discovery?.Poll();
         if (discovery != null && server == null && wire == null && connecting == null)
         {
@@ -1384,6 +1478,110 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
         {
             upnp.Dispose();
             upnp = null;
+        }
+    }
+
+    // One step of the internet relay per editor frame. Everything slow (the download, cloudflared's start, the HTTP probe) is a task or a process that is
+    // polled here and never waited on; the relay itself is pumped first so a frame's traffic is forwarded before anything else is decided.
+    private void PollInternetHosting()
+    {
+        if (hostingPlan == null)
+        {
+            return;
+        }
+        embeddedRelay?.Pump();
+        if (hostingPlan.Phase == HostingPhase.Failed)
+        {
+            return;
+        }
+        quickTunnel?.Pump();
+        string probe = null;
+        if (reachabilityTask != null && reachabilityTask.IsCompleted)
+        {
+            // Completed, so reading it cannot block. CheckReachabilityAsync turns every failure into a sentence; a faulted task is not expected.
+            probe = reachabilityTask.IsCompletedSuccessfully ? reachabilityTask.GetAwaiter().GetResult() : HostingPlan.ProbeVerdict(null, null);
+            reachabilityTask = null;
+            reachabilityCancel?.Dispose();
+            reachabilityCancel = null;
+        }
+        HostingDecision decision = hostingPlan.Pump(HostingInputsNow(probe));
+        // The plan has now seen the failed tool. Releasing it kills cloudflared's process tree, so a restart begins from a clean one.
+        if (quickTunnel?.State == CloudflaredTool.Phase.Failed)
+        {
+            quickTunnel.Dispose();
+            quickTunnel = null;
+        }
+        switch (decision.Action)
+        {
+            case HostingAction.StartTunnel:
+                quickTunnel?.Dispose();
+                quickTunnel = null;
+                if (embeddedRelay != null)
+                {
+                    quickTunnel = new CloudflaredTool();
+                    quickTunnel.Begin(embeddedRelay.Port);
+                }
+                break;
+            case HostingAction.ProbeReachability:
+            {
+                string health = HostingPlan.HealthUrl(decision.PublicUrl);
+                reachabilityCancel = new CancellationTokenSource(ReachabilityProbeTimeout);
+                reachabilityTask = health != null ? CheckReachabilityAsync(health, reachabilityCancel.Token) : Task.FromResult(HostingPlan.ProbeVerdict(null, null));
+                break;
+            }
+            case HostingAction.PublishRelayInvite:
+                publicRelayUrl = decision.PublicUrl;
+                inviteCarriesRelay = true;
+                inviteCodeValue = BuildInviteCode(hostPort);
+                break;
+            case HostingAction.WithdrawRelayInvite:
+                WithdrawPublicRelay();
+                break;
+        }
+        // Whatever the action, an invite names the public relay only while the plan is Ready.
+        if (hostingPlan.Phase != HostingPhase.Ready && publicRelayUrl != null)
+        {
+            WithdrawPublicRelay();
+        }
+        if (hostingPlan.Phase == HostingPhase.Failed)
+        {
+            // Final for this session: nothing is left to probe or restart. The loopback relay stays until the session ends, as the host's RelayHost uses it.
+            reachabilityCancel?.Cancel();
+            reachabilityCancel?.Dispose();
+            reachabilityCancel = null;
+            reachabilityTask = null;
+            quickTunnel?.Dispose();
+            quickTunnel = null;
+        }
+    }
+
+    private void WithdrawPublicRelay()
+    {
+        publicRelayUrl = null;
+        inviteCarriesRelay = false;
+        if (inviteCodeValue != null)
+        {
+            inviteCodeValue = BuildInviteCode(hostPort);
+        }
+    }
+
+    // Through the engine's HTTP client, the only one an editor script may use, as SandboxCloudflareTransport does. Every outcome becomes the plan's
+    // verdict sentence; the time budget is the token's (ReachabilityProbeTimeout).
+    private static async Task<string> CheckReachabilityAsync(string healthUrl, CancellationToken token)
+    {
+        try
+        {
+            using var response = await Http.RequestAsync(healthUrl, "GET", null, null, token);
+            string body = await response.Content.ReadAsStringAsync(token);
+            return HostingPlan.ProbeVerdict((int)response.StatusCode, body);
+        }
+        catch (OperationCanceledException)
+        {
+            return "The public relay address did not answer within " + ReachabilityProbeTimeout.TotalSeconds + " seconds.";
+        }
+        catch (Exception)
+        {
+            return HostingPlan.ProbeVerdict(null, null);
         }
     }
 
@@ -1426,6 +1624,19 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
     {
         discovery?.StopHost();
         upnp?.Unmap();
+        // The internet relay closes with the session that opened it: the probe is cancelled, cloudflared's process tree is killed (it also dies on its
+        // own at hotload and editor exit, see CloudflaredTool), and the loopback relay stops listening.
+        reachabilityCancel?.Cancel();
+        reachabilityCancel?.Dispose();
+        reachabilityCancel = null;
+        reachabilityTask = null;
+        quickTunnel?.Dispose();
+        quickTunnel = null;
+        embeddedRelay?.Dispose();
+        embeddedRelay = null;
+        embeddedRelayError = null;
+        hostingPlan = null;
+        publicRelayUrl = null;
         // A failed or ended session must not keep taking guests through the relay either.
         relayHost?.Dispose();
     }

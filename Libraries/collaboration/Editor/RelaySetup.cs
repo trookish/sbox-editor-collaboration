@@ -69,6 +69,52 @@ public static class RelaySetup
     private static string tokenInUse;
 
     private static bool localLoaded;
+    // The internet relay preference (Core/LocalTunnelSetting.cs): read once, written when the Relay card's checkbox changes. It sits next to the local
+    // relay file in .collaboration/, which Git ignores and the manifest skips, because it is one person's choice and not the project's.
+    private static bool tunnelSettingLoaded;
+
+    private static bool tunnelEnabled = true;
+
+    private static string TunnelSettingPath => Path.Combine(SceneAdapter.Root, ".collaboration", LocalTunnelSetting.FileName);
+
+    /// <summary>
+    /// Whether hosting opens the internet relay. On unless this computer turned it off; a file that cannot be read or says something unexpected keeps
+    /// it off (and says so in the log), because a public address must never be opened by accident.
+    /// </summary>
+    public static bool InternetRelayEnabled
+    {
+        get
+        {
+            if (!tunnelSettingLoaded)
+            {
+                tunnelSettingLoaded = true;
+                string problem;
+                try
+                {
+                    string path = TunnelSettingPath;
+                    tunnelEnabled = LocalTunnelSetting.Parse(File.Exists(path) ? File.ReadAllText(path) : null, out problem);
+                }
+                catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+                {
+                    tunnelEnabled = false;
+                    problem = "The internet relay preference in .collaboration/" + LocalTunnelSetting.FileName + " could not be read (" + ex.Message + "), so the internet relay stays off.";
+                }
+                if (problem != null)
+                {
+                    GlobalGameNamespace.Log.Error("Collaboration relay: " + CollaborationDiagnostics.Bounded(problem));
+                }
+            }
+            return tunnelEnabled;
+        }
+        set
+        {
+            string path = TunnelSettingPath;
+            Directory.CreateDirectory(Path.GetDirectoryName(path));
+            File.WriteAllText(path, LocalTunnelSetting.Format(value));
+            tunnelEnabled = value;
+            tunnelSettingLoaded = true;
+        }
+    }
 
     private static string localRelay;
 

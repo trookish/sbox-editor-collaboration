@@ -64,6 +64,11 @@ public sealed class CloudflaredTool : IDisposable
     public Phase State { get; private set; } = Phase.Idle;
     public string Status { get; private set; } = "The tunnel is not running.";
     public string RelayUrl { get; private set; }
+    /// <summary>
+    /// True once cloudflared reported a registered edge connection. The address is printed before that, and asking for it then gets "no such name"
+    /// cached by resolvers for a minute, so HostingPlan probes only after this has been seen.
+    /// </summary>
+    public bool RegisteredConnectionSeen { get; private set; }
     public string Error { get; private set; }
 
     /// <summary>Idempotent while starting or running. A failed attempt can be retried after Dispose by constructing a new tool.</summary>
@@ -218,6 +223,7 @@ public sealed class CloudflaredTool : IDisposable
             {
                 while ( output.TryDequeue( out string line ) )
                 {
+                    if ( CloudflaredRules.IsRegisteredLine( line ) ) RegisteredConnectionSeen = true;
                     if ( State != Phase.WaitingForAddress ) continue;
                     string address = CloudflaredRules.ParseTunnelAddress( line );
                     if ( address == null ) continue;
@@ -242,7 +248,7 @@ public sealed class CloudflaredTool : IDisposable
             StartInfo = new ProcessStartInfo
             {
                 FileName = toolPath,
-                Arguments = CloudflaredRules.BuildArguments( port ),
+                Arguments = CloudflaredRules.BuildEmbeddedArguments( port ),
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 RedirectStandardOutput = true,
