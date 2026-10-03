@@ -358,6 +358,20 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
     // this session already reports to the person.
     private FileSyncClient projectFiles;
 
+    /// <summary>The project files changed in the current session (the dock's "Files changed in this session"); replaced when a session starts.</summary>
+    public SessionChangeLog Changes { get; private set; } = new SessionChangeLog();
+
+    /// <summary>How many files the previous session changed, read once when this session started; null when there is no usable record.</summary>
+    public int? PreviousSessionChanges { get; private set; }
+
+    // Never merges the earlier file: it is read only for its count, and the new log marks itself for writing so the file stops describing the old session.
+    private void BeginChangeLog()
+    {
+        PreviousSessionChanges = SessionChangeLog.ReadPreviousCount(SceneAdapter.Root);
+        Changes = new SessionChangeLog();
+        Changes.RequestWrite();
+    }
+
     private string lastHostFileNotice;
 
     // The geometry channel of this editor's connection (null while the host does not advertise it). It serves what the host asks for, holds
@@ -906,6 +920,7 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
     {
         SceneEditorSession sceneEditorSession = SceneEditorSession.All.FirstOrDefault((SceneEditorSession x) => x.Scene == scene) ?? SceneEditorSession.Active;
         string text = SceneAdapter.PathOf(sceneEditorSession);
+        if (text != null && Connected) Changes.Record("Assets/" + text, SessionChangeKind.Changed, "you");
         Tracked tracked = null;
         DateTime dateTime = default;
         if (text != null && scenes.TryGetValue(text, out var value) && value.Session == sceneEditorSession)
@@ -1033,6 +1048,7 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
             }
         }
         string path = Path.Combine(SceneAdapter.Root, "ProjectSettings", "collaboration.json");
+        BeginChangeLog();
         if (plan.Host)
         {
             // The first Host click on a new project writes the shared settings itself: a fresh project id and the library's own gates, all on.
@@ -1216,6 +1232,7 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                 result.SharedPlayEnabled = SharedPlayPreference.Enabled;
                 result.HostEngineBaseline = SceneAdapter.EngineBaseline();
                 result.FileChanged = RefreshAsset;
+                result.Changes = Changes;
                 boundPort = num2;
                 return result;
             }
@@ -2134,6 +2151,7 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
         {
         }
         ResourceDisposalResult resourceDisposalResult = ResourceDisposalRules.DisposePair(wire, "collaboration transport", server, "collaboration host server");
+        Changes.Flush(SceneAdapter.Root, true);
         wire = null;
         server = null;
         projectFiles?.Dispose();
@@ -2268,6 +2286,7 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
 
     public void Frame()
     {
+        if (Project.Current != null) Changes.Flush(SceneAdapter.Root, false);
         if (focusNoticeExpires != default(DateTime) && DateTime.UtcNow >= focusNoticeExpires)
         {
             FocusNotice = null;
@@ -3455,7 +3474,7 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
             // Only a host that advertises file synchronization is asked for its index; an older host gets the session as before.
             if (p.Features != null && p.Features.Contains( FileSyncLimits.Feature ))
             {
-                projectFiles = new FileSyncClient( Project.Current.RootDirectory.FullName ) { FileChanged = RefreshAsset };
+                projectFiles = new FileSyncClient( Project.Current.RootDirectory.FullName ) { FileChanged = RefreshAsset, Changes = Changes };
                 projectFiles.Begin( packet => wire.Send( packet ) );
             }
             // Shared play is opt-in on both sides: this computer chose it, and the host says it relays it. Otherwise nothing of it exists here.

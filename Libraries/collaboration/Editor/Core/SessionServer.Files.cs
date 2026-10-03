@@ -61,6 +61,9 @@ public sealed partial class SessionServer
     /// <summary>Called with the project-relative path of every file the host wrote or deleted for a member, so its editor can refresh the asset.</summary>
     public Action<string> FileChanged { get; set; }
 
+    /// <summary>The session's change log; every project file the host wrote or deleted for a member is recorded in it. Null records nothing.</summary>
+    public SessionChangeLog Changes { get; set; }
+
     /// <summary>The latest file synchronization notice on the host's side, for the host's own dock.</summary>
     public string FileNotice { get; private set; }
 
@@ -241,6 +244,7 @@ public sealed partial class SessionServer
             }
             fileIndex.Invalidate( header.Path );
             FileChanged?.Invoke( header.Path );
+            Changes?.Record( header.Path, recovery == null ? SessionChangeKind.Added : SessionChangeKind.Changed, member.Name, header.Sha256 ); // code transfer records here: w/code adds SessionChangeKind.CodeReceived at its own write
             string clash = fileAuthority.Commit( header.Path, header.Id, header.BaseSha256, header.Sha256, member.Name ?? "a collaborator", member.Peer, recovery, out string otherPeer );
             if ( clash != null ) FileClashNotice( member, otherPeer, clash );
             Broadcast( new Packet { Kind = "file-changed", Path = header.Path, Sha256 = header.Sha256.ToLowerInvariant(), Total = header.Total, Peer = member.Peer } );
@@ -267,6 +271,7 @@ public sealed partial class SessionServer
         }
         fileIndex.Invalidate( packet.Path );
         FileChanged?.Invoke( packet.Path );
+        Changes?.Record( packet.Path, SessionChangeKind.Deleted, member.Name );
         string clash = fileAuthority.Commit( packet.Path, packet.Id, packet.BaseSha256, null, member.Name ?? "a collaborator", member.Peer, recovery, out string otherPeer );
         if ( clash != null ) FileClashNotice( member, otherPeer, clash );
         Broadcast( new Packet { Kind = "file-deleted", Path = packet.Path, BaseSha256 = packet.BaseSha256, Peer = member.Peer } );
