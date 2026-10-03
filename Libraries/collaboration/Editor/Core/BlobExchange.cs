@@ -126,6 +126,18 @@ public sealed class BlobExchange
     /// <summary>Geometry the other end has asked for and this end has not finished sending.</summary>
     public int QueuedBlobs => jobs.Count;
 
+    /// <summary>Gives back the pending-bytes reservation of everything half-assembled; the connection is gone and nothing will complete.</summary>
+    public void Release()
+    {
+        foreach ( Assembly assembly in assemblies.Values ) budget.Release( assembly.Total );
+        assemblies.Clear();
+        PendingBytes = 0;
+        held.Clear();
+        wanted.Clear();
+        requested.Clear();
+        jobs.Clear();
+    }
+
     public static bool IsBlobPacket( string kind ) => kind is "blob-need" or "blob-data" or "blob-ack";
 
     // Only these carry object states. Everything else (presence, pings, files, settings) is never held, so live cursors stay live.

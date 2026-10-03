@@ -192,7 +192,7 @@ public sealed partial class SessionServer : IDisposable
             int num = 64;
             while (true)
             {
-                if (num-- <= 0 || !m.Wire.Incoming.TryDequeue(out var p))
+                if (num-- <= 0 || !NextPacket(m, out var p))
                 {
                     break;
                 }
@@ -340,6 +340,7 @@ public sealed partial class SessionServer : IDisposable
             }
         }
         PumpFileOutboxes();
+        PumpBlobs();
     }
 
     // A ping from a peer that predates the digest, or one that names a scene the host does not hold, is answered with the pong alone. Nothing
@@ -613,7 +614,7 @@ public sealed partial class SessionServer : IDisposable
         {
             Kind = "welcome",
             Session = sessionId,
-            Features = string.IsNullOrEmpty(FileProjectRoot) ? null : new List<string> { FileSyncLimits.Feature }
+            Features = WelcomeFeatures()
         };
     }
 
@@ -627,6 +628,7 @@ public sealed partial class SessionServer : IDisposable
         if (members.Remove(member))
         {
             ForgetFileMember(member);
+            ForgetBlobMember(member);
             member.Wire.Dispose();
             if (member.Peer != null)
             {
