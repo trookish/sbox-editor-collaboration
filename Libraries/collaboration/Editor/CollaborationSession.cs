@@ -62,6 +62,14 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
         public DateTime DiskStamp;
 
         public DateTime StampMismatchSince;
+        public ApplyRecovery Recovery = new ApplyRecovery();
+        // Objects this editor could not show or capture: their host JSON stays in Known and is never sent back (ApplyRecovery).
+        public HashSet<string> SkippedObjects = new HashSet<string>(StringComparer.Ordinal);
+        // The person's state to replay after a resync, when the live scene could not be put back after a failed apply.
+        public Dictionary<string, ObjectState> HeldLocal;
+        // The resync replaces the local state instead of replaying it (the host refused it; it is in the recovery copy).
+        public bool DiscardLocalOnResync;
+        public bool DiskWarningShown;
     }
 
     private sealed class StartPlan
@@ -149,6 +157,11 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
     private bool soloHarness;
 
     private readonly HeldPacketBuffer heldPackets = new HeldPacketBuffer();
+    // Scenes whose host updates were discarded (play-mode buffer overflow) or could not be routed (the scene is playing): each is
+    // resynchronized from the host once it can take a snapshot again.
+    private readonly HashSet<string> resyncWhenRoutable = new HashSet<string>(StringComparer.Ordinal);
+    private readonly HashSet<string> closedPacketNotices = new HashSet<string>(StringComparer.Ordinal);
+    private readonly HashSet<string> onceNotices = new HashSet<string>(StringComparer.Ordinal);
 
     private bool inviteCarriesRelay;
 
@@ -1997,10 +2010,13 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                 SceneEditorSession sceneEditorSession = AuthoringSource();
                 string sourceScenePath = SceneAdapter.PathOf(sceneEditorSession);
                 bool flag = PlayModeSourceCoexistence.CanProcessSourcePackets(sceneEditorSession?.IsPlaying ?? false, sceneEditorSession, sourceScenePath, RuntimeLifecycle, CurrentRuntimeFor(sceneEditorSession));
-                if (!ConnectionPromotionRules.ShouldPromote(flag, lifecycle.CanPromoteConnection))
+                // Playing, or having no scene open, only pauses source synchronization (PlaySpectateRules): the connection completes,
+                // presence flows and scene packets are held until play stops. Only a runtime a hotload interrupted still refuses.
+                PlaySpectateDecision promoteDecision = PlaySpectateRules.Decide(IsLocalPlaying(sceneEditorSession), RuntimeLifecycle.State, flag, PlayModeSourceCoexistence.IsUsablePathKey(sourceScenePath));
+                if (!ContentFailureRules.MayPromoteConnection(promoteDecision, lifecycle.CanPromoteConnection))
                 {
                     BeginConnectionTeardown(recoverWhenComplete: false);
-                    if (!flag)
+                    if (promoteDecision == PlaySpectateDecision.FailStop)
                     {
                         throw new InvalidOperationException("Stop play mode or complete the approved runtime lifecycle before promoting a source connection");
                     }
@@ -2045,6 +2061,24 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                 Status = "Connected • applying changes made while you were playing";
             }
             PlayDecision = decision;
+            if (decision == PlaySpectateDecision.Normal && resyncWhenRoutable.Count > 0)
+            {
+                // Updates for these scenes were discarded while they could not take them: ask the host for each again (uncounted).
+                foreach (string scene in resyncWhenRoutable.ToArray())
+                {
+                    Tracked affected = TrackedFor(scene);
+                    if (affected != null && affected.Session.IsPlaying)
+                    {
+                        continue;
+                    }
+                    resyncWhenRoutable.Remove(scene);
+                    if (affected != null && affected.Session.Scene.IsValid() && !affected.Recovery.Paused)
+                    {
+                        affected.Recovery.Requested();
+                        RequestSceneResync(scene, affected);
+                    }
+                }
+            }
             if (decision == PlaySpectateDecision.FailStop)
             {
                 throw new InvalidOperationException("Stop play mode or complete the approved runtime lifecycle before applying source packets");
@@ -2062,9 +2096,16 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
             {
                 if (decision != PlaySpectateDecision.Normal && HeldPacketBuffer.IsSceneChange(result.Kind))
                 {
-                    if (!heldPackets.TryHold(result))
+                    if (result.Scene != null && resyncWhenRoutable.Contains(result.Scene))
                     {
-                        throw new InvalidOperationException("Too many scene changes arrived while you were playing. Stop play mode, then use Recover & reconnect to catch up.");
+                        // That scene is resynchronized when play ends; the snapshot will contain this update.
+                    }
+                    else if (!heldPackets.TryHold(result))
+                    {
+                        // Applying some of the held updates and not others would leave scenes in a state nobody had: all are discarded
+                        // and every affected scene is synchronized from the host when play ends (ContentFailureRules.DrainOverflow).
+                        resyncWhenRoutable.UnionWith(ContentFailureRules.DrainOverflow(heldPackets, result));
+                        SetActionNotice("More scene updates arrived while you were playing than this editor holds. The affected scenes will be synchronized from the host when play ends.");
                     }
                     lastReceive = DateTime.UtcNow;
                     continue;
@@ -2115,7 +2156,8 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                 string text = SceneAdapter.PathOf(sceneEditorSession3);
                 if (sceneEditorSession3.IsPlaying && !PlayModeSourceCoexistence.CanSampleAuthoringSource(sceneEditorSession3, text, RuntimeLifecycle, CurrentRuntimeFor(sceneEditorSession3)))
                 {
-                    throw new InvalidOperationException("Stop play mode before editing collaboratively");
+                    // Another source is playing: do not sample runtime mutations as authoring edits.
+                    continue;
                 }
                 if (text == null || !text.StartsWith("scenes/"))
                 {
@@ -2125,11 +2167,23 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                 {
                     if (value?.Pending != null)
                     {
-                        throw new InvalidOperationException("Scene closed with an edit awaiting acknowledgement");
+                        // Keep the durable outbox until the host answers; replacing the tracked scene here would orphan it.
+                        NoticeOnce("reopened-pending:" + text, "\"" + text + "\" is synchronized again once the host answers the edit you sent before it was closed. Your edit remains in the recovery outbox.");
+                        continue;
                     }
                     if (sceneEditorSession3.HasUnsavedChanges)
                     {
-                        throw new InvalidOperationException("Newly opened scene has local unsaved edits; recover before subscribing");
+                        try
+                        {
+                            WriteSceneBackup(text, new Tracked { Session = sceneEditorSession3 });
+                            SetActionNotice("Unsent changes to the reopened scene were backed up before host synchronization.");
+                        }
+                        catch (Exception error)
+                        {
+                            NoticeOnce("reopened-backup:" + text, "\"" + text + "\" is not synchronized because a recovery copy of its unsaved changes could not be written (" +
+                                ApplyRecovery.ShortReason(error.Message) + "). Save the scene, then reopen it.");
+                            continue;
+                        }
                     }
                     value = new Tracked
                     {
@@ -2150,7 +2204,7 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                 }
                 else
                 {
-                    if (!value.Ready || value.Pending != null)
+                    if (!value.Ready || value.Pending != null || value.Recovery.Resyncing || value.Recovery.Paused)
                     {
                         continue;
                     }
@@ -2171,23 +2225,61 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                     {
                         mismatchFor = DateTime.UtcNow - value.StampMismatchSince;
                     }
-                    if (SceneSaveRules.ShouldFailOnDiskStamp(flag2, mismatchFor))
+                    bool stampFlagged = SceneSaveRules.ShouldFailOnDiskStamp(flag2, mismatchFor);
+                    string diskBackup = null;
+                    string diskError = null;
+                    if (stampFlagged)
                     {
+                        // The file on disk changed outside a collaboration save. The open, live scene is what everyone shares; the disk
+                        // version is copied to the recovery folder so nothing written there is lost.
+                        try
+                        {
+                            diskBackup = CopyDiskVersion(text);
+                        }
+                        catch (Exception error)
+                        {
+                            diskError = error.Message;
+                        }
+                    }
+                    DiskStampAction stampAction = ContentFailureRules.OnDiskStampMismatch(stampFlagged, diskBackup != null);
+                    if (stampAction == DiskStampAction.KeepLiveScene)
+                    {
+                        value.DiskStamp = dateTime;
                         value.StampMismatchSince = default;
-                        throw new InvalidOperationException("Scene file changed outside Collaboration Save. Local state retained; leave and reconcile the file in Git.");
+                        if (!value.DiskWarningShown)
+                        {
+                            value.DiskWarningShown = true;
+                            SetActionNotice("The file of \"" + text + "\" was changed outside collaboration. The open scene stays as it is for everyone; the file's version was copied to " + diskBackup + ".");
+                        }
+                    }
+                    else if (stampAction == DiskStampAction.PauseScene)
+                    {
+                        PauseScene(text, value, "Synchronization of \"" + text + "\" is paused because its file was changed outside collaboration and a copy of that file could not be written (" +
+                            ApplyRecovery.ShortReason(diskError) + "). Your changes to this scene are kept locally. Reopen the scene to try again.");
+                        continue;
                     }
                     // Scene settings are host-authoritative state like objects (SettingsMerge): a local change is sent whole, one packet per scene
                     // at a time, and the host merges it per top-level key. LocalChange compares float-tolerantly and ignores what the engine
                     // itself refused to take, so neither noise nor residue is ever sent.
-                    if (value.SettingsPending == null)
+                    // Reading the scene is the engine's work: if it throws for the scene as a whole (an object that throws alone is kept
+                    // by CaptureTolerant), only this scene stops synchronizing.
+                    JsonObject settingsChange;
+                    Dictionary<string, ObjectState> dictionary;
+                    try
                     {
-                        JsonObject settingsChange = SettingsMerge.LocalChange(value.Settings, value.SettingsApplied, value.SettingsEcho, SceneSettingsAdapter.Capture(sceneEditorSession3.Scene));
-                        if (settingsChange != null)
-                        {
-                            SendSettings(text, value, settingsChange);
-                        }
+                        settingsChange = value.SettingsPending == null ? SettingsMerge.LocalChange(value.Settings, value.SettingsApplied, value.SettingsEcho, SceneSettingsAdapter.Capture(sceneEditorSession3.Scene)) : null;
+                        dictionary = CaptureTolerant(text, value);
                     }
-                    Dictionary<string, ObjectState> dictionary = SceneAdapter.Capture(sceneEditorSession3.Scene);
+                    catch (Exception error)
+                    {
+                        PauseScene(text, value, "Synchronization of \"" + text + "\" is paused because this editor could not read the scene (" + ApplyRecovery.ShortReason(error.Message) +
+                            "). Your changes to this scene are kept locally. Reopen the scene to try again.");
+                        continue;
+                    }
+                    if (settingsChange != null)
+                    {
+                        SendSettings(text, value, settingsChange);
+                    }
                     List<string> scanNotices = new List<string> { SceneAdapter.TakeNotices() };
                     // An object that is still in the scene but no longer saved with it (for example marked Not Saved) is absent from
                     // the capture, so the diff below deletes it from the shared scene; the person is told once.
@@ -2236,7 +2328,24 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
             ScenePacketRouteResult scenePacketRouteResult = ScenePacketRouting.RouteTrackedPacket(result.Kind, result.Scene, trackedByScene, (object target) => ((Tracked)target).Session.IsPlaying, (object target) => SceneAdapter.PathOf(((Tracked)target).Session), RuntimeLifecycle, (object target) => CurrentRuntimeFor(((Tracked)target).Session));
             if (!scenePacketRouteResult.Admitted)
             {
-                throw new InvalidOperationException(scenePacketRouteResult.Error ?? "Scene packet was rejected by routing admission.");
+                Tracked routed = TrackedFor(result.Scene);
+                string canonicalKey = ScenePacketRouting.CanonicalSceneKey(result.Scene);
+                bool targetOpen = routed != null && routed.Session.Scene.IsValid() && SceneEditorSession.All.Contains(routed.Session) &&
+                    ScenePacketRouting.CanonicalSceneKey(SceneAdapter.PathOf(routed.Session)) == canonicalKey;
+                switch (ContentFailureRules.ClassifyRouteFailure(canonicalKey != null, routed != null, targetOpen))
+                {
+                    case RouteFailureAction.IgnoreClosed:
+                        NoticeClosedPacket(result.Scene);
+                        return;
+                    case RouteFailureAction.ResyncWhenRoutable:
+                        // The scene is open but cannot take host state now (it is playing). The update is not lost: the scene is
+                        // synchronized from the host once it can.
+                        resyncWhenRoutable.Add(result.Scene);
+                        return;
+                    default:
+                        throw new InvalidOperationException((scenePacketRouteResult.Error ?? "A scene update named no valid scene.") +
+                            " The host is not speaking this protocol. Leave the session and reconnect to the correct host.");
+                }
             }
         }
         lastReceive = DateTime.UtcNow;
@@ -2703,6 +2812,241 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
         throw new InvalidOperationException(RecoveryBackup.BackupFailedMessage);
     }
 
+    // ---- Content failures heal one scene (ApplyRecovery, ContentFailureRules, docs/FAILURE-MODES.md) ----------------------------------------------------
+
+    // Logged once per scene: a packet for a scene this editor does not have open (closed meanwhile). Reopening it subscribes again.
+    private void NoticeClosedPacket(string scene)
+    {
+        if (closedPacketNotices.Add(scene ?? ""))
+        {
+            GlobalGameNamespace.Log.Info("Collaboration: an update for \"" + scene + "\", which is not open in this editor, was ignored. Reopening the scene synchronizes it again.");
+        }
+    }
+
+    // A notice that would otherwise be set on every scan (50 ms) is shown once per key.
+    private void NoticeOnce(string key, string notice)
+    {
+        if (onceNotices.Add(key))
+        {
+            SetActionNotice(notice);
+        }
+    }
+
+    // Copies a scene's file on disk to the recovery folder under a name never used before and returns the copy's path. Nothing to
+    // copy (the file was removed) counts as preserved.
+    private string CopyDiskVersion(string scene)
+    {
+        string disk = Path.Combine(SceneAdapter.Root, "Assets", scene);
+        if (!File.Exists(disk))
+        {
+            return "(no file on disk)";
+        }
+        string folder = Path.Combine(SceneAdapter.Root, ".collaboration", "recovery");
+        Directory.CreateDirectory(folder);
+        string name = RecoveryBackup.BuildFileName(scene, DateTime.UtcNow);
+        string stem = name.EndsWith(".scene", StringComparison.Ordinal) ? name.Substring(0, name.Length - ".scene".Length) : name;
+        string path = Path.Combine(folder, stem + "-disk.scene");
+        for (int counter = 2; File.Exists(path) && counter < 100; counter++)
+        {
+            path = Path.Combine(folder, stem + "-disk-" + counter + ".scene");
+        }
+        File.Copy(disk, path, overwrite: false);
+        return path;
+    }
+
+    // Stops synchronizing one scene; the session, presence and every other scene continue. Reopening the scene creates a new tracked
+    // scene and so clears the pause.
+    private void PauseScene(string scene, Tracked tracked, string notice)
+    {
+        tracked.Recovery.Pause();
+        tracked.Ready = false;
+        tracked.HeldLocal = null;
+        SetActionNotice(notice);
+        ShowToast("Scene synchronization paused", notice, Theme.Primary, 15f);
+    }
+
+    private static string BackupFailedPauseNotice(string scene, string reason)
+    {
+        return "Synchronization of \"" + scene + "\" is paused because a recovery copy of the scene could not be written (" + ApplyRecovery.ShortReason(reason) +
+            "). Your changes to this scene are kept locally. Free disk space or check folder permissions, then reopen the scene to try again.";
+    }
+
+    // Asks the host for the scene again: the same subscribe a reconnect sends. The answer is an ordinary snapshot.
+    private void RequestSceneResync(string scene, Tracked tracked)
+    {
+        if (tracked.Recovery.Paused || !tracked.Session.Scene.IsValid())
+        {
+            return;
+        }
+        tracked.Ready = false;
+        wire.Send(new Packet
+        {
+            Kind = "subscribe",
+            Scene = scene,
+            Objects = tracked.Known.Values.ToList(),
+            Settings = tracked.Settings
+        });
+    }
+
+    // The live scene as a scan sees it: an object whose capture throws keeps its confirmed state, and so does every object this editor
+    // could not show. Neither is ever sent as this person's change or deletion.
+    private Dictionary<string, ObjectState> CaptureTolerant(string scene, Tracked tracked)
+    {
+        HashSet<string> failures = new HashSet<string>(StringComparer.Ordinal);
+        Dictionary<string, ObjectState> live = SceneAdapter.Capture(tracked.Session.Scene, tracked.Known, failures);
+        foreach (string id in failures)
+        {
+            if (tracked.SkippedObjects.Add(id))
+            {
+                string name = tracked.Known.TryGetValue(id, out ObjectState known) ? StateRules.NameOf(known, id) : id;
+                SetActionNotice("\"" + name + "\" in \"" + scene + "\" could not be read by this editor. Its last synchronized state is kept for everyone and it is not sent as a change.");
+            }
+        }
+        return ApplyRecovery.PreserveSkipped(tracked.Known, live, tracked.SkippedObjects);
+    }
+
+    // The live scene as the editor shows it, for building an apply target: a skipped object keeps the version shown here, so applying
+    // the target never touches it again. (An object whose capture throws is listed with its confirmed state.)
+    private Dictionary<string, ObjectState> CaptureShown(string scene, Tracked tracked)
+    {
+        return SceneAdapter.Capture(tracked.Session.Scene, tracked.Known, new HashSet<string>(StringComparer.Ordinal));
+    }
+
+    private static Func<Dictionary<string, ObjectState>, Exception> TryApply(Tracked tracked)
+    {
+        return candidate =>
+        {
+            try
+            {
+                SceneAdapter.Apply(tracked.Session, candidate);
+                return null;
+            }
+            catch (Exception error)
+            {
+                return error;
+            }
+        };
+    }
+
+    // Applying a host packet threw in this editor. The decision is ApplyRecovery's: resync (the live scene is put back where it was when
+    // that is known, backed up, and the host is asked for the scene again), isolate (returned to the caller, which owns the snapshot), or
+    // pause. Never Fail: the cause is this editor's engine, not the session.
+    private ApplyRecoveryDecision RecoverScene(string scene, Tracked tracked, Exception error, Dictionary<string, ObjectState> before, bool snapshot)
+    {
+        ApplyRecoveryDecision decision = tracked.Recovery.Failed(DateTime.UtcNow, snapshot);
+        GlobalGameNamespace.Log.Warning("Collaboration: applying a host update to \"" + scene + "\" failed (" + decision + "): " + CollaborationTransportDiagnostics.BoundedExceptionDiagnostic("", error));
+        if (decision == ApplyRecoveryDecision.SkipObjects)
+        {
+            return decision;
+        }
+        if (before != null)
+        {
+            // A half-applied packet must not be read back as this person's edits. If the scene cannot be put back, the state from before
+            // the packet is what gets replayed after the snapshot.
+            if (TryApply(tracked)(before) != null)
+            {
+                tracked.HeldLocal ??= before;
+            }
+        }
+        string backup;
+        try
+        {
+            backup = WriteSceneBackup(scene, tracked);
+        }
+        catch (Exception backupError)
+        {
+            PauseScene(scene, tracked, BackupFailedPauseNotice(scene, backupError.Message));
+            return ApplyRecoveryDecision.Pause;
+        }
+        if (decision == ApplyRecoveryDecision.Pause)
+        {
+            PauseScene(scene, tracked, ApplyRecovery.PausedNotice(scene));
+            return decision;
+        }
+        RequestSceneResync(scene, tracked);
+        SetActionNotice("An update to \"" + scene + "\" could not be applied in your editor (" + ApplyRecovery.ShortReason(error?.Message) + "). A copy of your scene was saved to " +
+            backup + ". The scene is being synchronized again; your unsent changes are kept and sent afterwards.");
+        return decision;
+    }
+
+    // Applies a snapshot. Returns false when the scene did not take it (resync requested, paused); the caller then leaves Known as it is.
+    // While the scene resyncs, the edits held since the failure are replayed on top of the fresh state (ApplyRecovery.ReplayHeld) and the next
+    // scan sends them as ordinary edits.
+    private bool ApplyHostScene(string scene, Tracked tracked, Dictionary<string, ObjectState> target)
+    {
+        if (tracked.Recovery.Paused)
+        {
+            return false;
+        }
+        // A malformed host graph is not an engine limitation of this editor: it stays a protocol failure.
+        StateRules.ValidateGraph(target);
+        bool resyncing = tracked.Recovery.Resyncing;
+        // live: what the editor shows (the starting point of isolation and of a put-back); held: the person's edits as a scan reads them.
+        Dictionary<string, ObjectState> live = CaptureShown(scene, tracked);
+        Dictionary<string, ObjectState> heldBase = new Dictionary<string, ObjectState>(tracked.Known);
+        Dictionary<string, ObjectState> held = tracked.HeldLocal ?? CaptureTolerant(scene, tracked);
+        Dictionary<string, ObjectState> shown = target;
+        try
+        {
+            SceneAdapter.Apply(tracked.Session, target);
+            tracked.SkippedObjects.Clear();
+        }
+        catch (Exception error)
+        {
+            if (RecoverScene(scene, tracked, error, live, snapshot: true) != ApplyRecoveryDecision.SkipObjects)
+            {
+                return false;
+            }
+            // The fresh snapshot fails as well: show what this editor can, leave out what it cannot. The host's JSON of every skipped object
+            // becomes Known with the rest, so nothing is lost and nothing is sent back.
+            Dictionary<string, string> reasons = new Dictionary<string, string>(StringComparer.Ordinal);
+            shown = ApplyRecovery.IsolateObjects(target, live, TryApply(tracked), reasons);
+            Exception final = TryApply(tracked)(shown);
+            if (final != null)
+            {
+                PauseScene(scene, tracked, ApplyRecovery.PausedNotice(scene));
+                return false;
+            }
+            List<string> skippedNotices = new List<string>();
+            foreach (KeyValuePair<string, string> skipped in reasons)
+            {
+                ObjectState state = target.GetValueOrDefault(skipped.Key) ?? live.GetValueOrDefault(skipped.Key);
+                if (!tracked.SkippedObjects.Contains(skipped.Key))
+                {
+                    skippedNotices.Add(ApplyRecovery.SkippedNotice(StateRules.NameOf(state, skipped.Key), skipped.Value));
+                }
+            }
+            tracked.SkippedObjects = new HashSet<string>(reasons.Keys, StringComparer.Ordinal);
+            string joined = ChangeRebase.JoinNotices(skippedNotices.ToArray());
+            if (joined != null)
+            {
+                SetActionNotice(joined);
+                ShowToast("Scene objects not shown", joined, Theme.Primary, 15f);
+            }
+        }
+        if (resyncing && !tracked.DiscardLocalOnResync)
+        {
+            List<string> notices = new List<string>();
+            Dictionary<string, ObjectState> replayed = ApplyRecovery.ReplayHeld(heldBase, held, target, shown, tracked.SkippedObjects, notices);
+            if (StateRules.Diff(shown, replayed).Count > 0)
+            {
+                Exception replayError = TryApply(tracked)(replayed);
+                if (replayError != null)
+                {
+                    // The edits cannot be shown on top of the host's scene in this editor. They are in the recovery copy written before
+                    // the snapshot; the scene follows the host.
+                    TryApply(tracked)(shown);
+                    notices.Add("Your unsent changes to \"" + scene + "\" could not be reapplied on top of the host's scene (" + ApplyRecovery.ShortReason(replayError.Message) +
+                        "). They are kept in the recovery copy.");
+                }
+            }
+            SetMergeNotice(ChangeRebase.JoinNotices(notices.ToArray()));
+        }
+        tracked.HeldLocal = null;
+        tracked.DiscardLocalOnResync = false;
+        return true;
+    }
+
     private void Receive(Packet p)
     {
         if (p.Kind == "welcome")
@@ -2769,17 +3113,46 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
             {
                 RecoveryNotice = CollaborationDiagnostics.Bounded("Rejected offline edit retained in " + RecoveryPath + ": " + text);
             }
-            else
+            else if (p.Kind == "fatal")
             {
                 Fail(text);
             }
             if (p.Kind == "reject")
             {
-                if (!ScenePacketRouting.TryResolveTracked(p.Scene, ((IEnumerable<KeyValuePair<string, Tracked>>)scenes).ToDictionary((Func<KeyValuePair<string, Tracked>, string>)((KeyValuePair<string, Tracked> pair) => pair.Key), (Func<KeyValuePair<string, Tracked>, object>)((KeyValuePair<string, Tracked> pair) => pair.Value)), out canonical, out object target) || !(target is Tracked tracked))
+                Tracked tracked = TrackedFor(p.Scene);
+                if (tracked == null)
                 {
-                    throw new InvalidOperationException("Rejected packet has no current tracked scene target.");
+                    NoticeClosedPacket(p.Scene);
+                    return;
                 }
+                if (tracked.Pending?.Id != p.Id)
+                {
+                    return;
+                }
+                // The host refused this edit. That is the host deciding about content, not a broken session: the scene is copied to the
+                // recovery folder, the edit is dropped from the outbox, and the scene is synchronized from the host, replacing the refused
+                // state (re-sending it would only be refused again).
                 ForgetPending(tracked, p.Id);
+                if (!tracked.Session.Scene.IsValid() || tracked.Recovery.Paused)
+                {
+                    return;
+                }
+                string refusedBackup;
+                try
+                {
+                    refusedBackup = WriteSceneBackup(p.Scene, tracked);
+                }
+                catch (Exception error)
+                {
+                    PauseScene(p.Scene, tracked, BackupFailedPauseNotice(p.Scene, error.Message));
+                    return;
+                }
+                tracked.Recovery.Requested();
+                tracked.DiscardLocalOnResync = true;
+                RequestSceneResync(p.Scene, tracked);
+                string refused = "The host refused your change to \"" + p.Scene + "\" (" + text + "). The scene is synchronized from the host again; your version was saved to " + refusedBackup + ".";
+                SetActionNotice(refused);
+                ShowToast("Change refused by the host", refused, Theme.Primary, 15f);
             }
         }
         else if (p.Kind == "presence")
@@ -2803,11 +3176,12 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
             }
             if (p.Scene == null)
             {
-                throw new InvalidOperationException("Scene packet has no current tracked target.");
+                throw new InvalidOperationException("The host sent a scene update without a scene. The host is not speaking this protocol. Leave the session and reconnect to the correct host.");
             }
             if (!ScenePacketRouting.TryResolveTracked(p.Scene, ((IEnumerable<KeyValuePair<string, Tracked>>)scenes).ToDictionary((Func<KeyValuePair<string, Tracked>, string>)((KeyValuePair<string, Tracked> pair) => pair.Key), (Func<KeyValuePair<string, Tracked>, object>)((KeyValuePair<string, Tracked> pair) => pair.Value)), out canonical, out object target2) || !(target2 is Tracked tracked2))
             {
-                throw new InvalidOperationException("Scene packet has no current tracked target.");
+                NoticeClosedPacket(p.Scene);
+                return;
             }
             if (Error != null)
             {
@@ -2822,25 +3196,58 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                     tracked2.Settings = SettingsMerge.Clone(p.Settings);
                     return;
                 }
+                if (tracked2.Recovery.Paused)
+                {
+                    // A paused scene follows the host on paper only: nothing is applied or sent until it is reopened.
+                    tracked2.Known = dictionary;
+                    tracked2.Settings = SettingsMerge.Clone(p.Settings);
+                    return;
+                }
                 string restoredNotice = null;
                 if (!restoring)
                 {
-                    if (tracked2.Ready && (tracked2.Pending != null || tracked2.SettingsPending != null))
+                    if (!tracked2.Recovery.Resyncing && tracked2.Ready && (tracked2.Pending != null || tracked2.SettingsPending != null))
                     {
                         // A resync that arrives while an edit awaits the host's answer would replace the scene under that edit, and the answer
                         // would then be applied to a scene it was not made against. Nothing is lost by waiting: the digest is not sent while
                         // an edit is pending, and the next ping after the answer finds the drift again if it is still there.
                         return;
                     }
-                    if (StateRules.Diff(tracked2.Known, SceneAdapter.Capture(tracked2.Session.Scene)).Count > 0)
+                    // Unsent scene settings count as much as unsent objects: the copy is Scene.Serialize, which holds the scene's Properties
+                    // (its settings) next to its GameObjects. Settings that cannot even be read are treated as unsent.
+                    bool unsentSettings;
+                    try
+                    {
+                        unsentSettings = tracked2.Settings != null && HasUnsentSettings(tracked2);
+                    }
+                    catch (Exception)
+                    {
+                        unsentSettings = true;
+                    }
+                    if (ApplyRecovery.NeedsBackup(StateRules.Diff(tracked2.Known, CaptureTolerant(p.Scene, tracked2)).Count > 0, unsentSettings))
                     {
                         // Unsent edits are about to be replaced by the host's scene: they are written to a file first, and if that fails
-                        // the host's scene is not applied, because unsaved work is never replaced without a copy.
-                        restoredNotice = RecoveryBackup.BuildNotice(p.Scene, WriteSceneBackup(p.Scene, tracked2));
+                        // the host's scene is not applied, because unsaved work is never replaced without a copy. Only this scene pauses.
+                        try
+                        {
+                            restoredNotice = RecoveryBackup.BuildNotice(p.Scene, WriteSceneBackup(p.Scene, tracked2));
+                        }
+                        catch (Exception error)
+                        {
+                            PauseScene(p.Scene, tracked2, BackupFailedPauseNotice(p.Scene, error.Message));
+                            return;
+                        }
                     }
                 }
-                SceneAdapter.Apply(tracked2.Session, dictionary);
+                if (!ApplyHostScene(p.Scene, tracked2, dictionary)) return;
                 tracked2.Known = dictionary;
+                if (tracked2.Recovery.Resyncing && tracked2.Pending != null)
+                {
+                    ForgetPending(tracked2, tracked2.Pending.Id);
+                    tracked2.Group.Clear();
+                }
+                if (tracked2.Recovery.Resyncing) tracked2.SettingsPending = null;
+                tracked2.Recovery.Succeeded();
                 // The host's settings replace this editor's, as its objects do. A host holding none (its first subscriber predates settings
                 // sync) leaves the scene's settings alone, and with nothing confirmed no local change is ever sent for the scene.
                 tracked2.Settings = SettingsMerge.Clone(p.Settings);
@@ -2848,14 +3255,24 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                 tracked2.SettingsEcho = null;
                 if (p.Settings != null)
                 {
-                    WriteSettings(tracked2, p.Settings);
+                    try
+                    {
+                        WriteSettings(tracked2, p.Settings);
+                    }
+                    catch (Exception error)
+                    {
+                        // The objects are in; the settings are not. The next snapshot writes them again.
+                        tracked2.Recovery.Succeeded();
+                        RecoverScene(p.Scene, tracked2, error, null, snapshot: false);
+                        return;
+                    }
                 }
                 tracked2.Ready = true;
                 tracked2.Session.UndoSystem.Initialize();
                 tracked2.Group.Clear();
                 tracked2.Undo.Clear();
                 MirrorNativeUndo(tracked2);
-                if (scenes.Values.All((Tracked x) => x.Ready || !x.Session.Scene.IsValid()))
+                if (scenes.Values.All((Tracked x) => x.Ready || x.Recovery.Paused || !x.Session.Scene.IsValid()))
                 {
                     restoring = false;
                 }
@@ -2867,12 +3284,53 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
             }
             else if (p.Kind == SettingsMerge.PacketKind)
             {
-                ReceiveSettings(tracked2, p);
+                if (p.Settings == null)
+                {
+                    // Protocol integrity: a settings packet always carries the merged settings.
+                    throw new InvalidOperationException("The host sent a scene settings change without settings. The host is not speaking this protocol. Leave the session and reconnect to the correct host.");
+                }
+                if (!tracked2.Recovery.AppliesIncoming)
+                {
+                    // Resyncing: the snapshot carries these settings. Paused: they are recorded, not applied.
+                    seen.Add(p.Peer + ":" + p.Id);
+                    if (tracked2.Recovery.Paused)
+                    {
+                        tracked2.Settings = SettingsMerge.Clone(p.Settings);
+                    }
+                    if (tracked2.SettingsPending?.Id == p.Id)
+                    {
+                        tracked2.SettingsPending = null;
+                    }
+                    return;
+                }
+                try
+                {
+                    ReceiveSettings(tracked2, p);
+                }
+                catch (Exception error)
+                {
+                    RecoverScene(p.Scene, tracked2, error, null, snapshot: false);
+                }
             }
             else
             {
                 if (p.Kind != "accepted")
                 {
+                    return;
+                }
+                if (tracked2.Recovery.Resyncing)
+                {
+                    // The snapshot requested for this scene contains this change; the outbox is settled when it arrives.
+                    return;
+                }
+                if (tracked2.Recovery.Paused)
+                {
+                    // Recorded, not applied: the scene follows the host on paper until it is reopened.
+                    if (seen.Add(p.Peer + ":" + p.Id))
+                    {
+                        ApplyRecovery.Record(tracked2.Known, p.Changes);
+                    }
+                    ForgetPending(tracked2, p.Id);
                     return;
                 }
                 if (!seen.Add(p.Peer + ":" + p.Id))
@@ -2931,7 +3389,15 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                     }
                     if (rebaseChangesScene)
                     {
-                        SceneAdapter.Apply(tracked2.Session, rebased);
+                        Exception applyError = TryApply(tracked2)(rebased);
+                        if (applyError != null)
+                        {
+                            // Known now holds what the host kept; rebased is the person's scene on top of it, which is what is replayed.
+                            ForgetPending(tracked2, p.Id);
+                            tracked2.HeldLocal = rebased;
+                            RecoverScene(p.Scene, tracked2, applyError, null, snapshot: false);
+                            return;
+                        }
                         tracked2.Session.UndoSystem.Initialize();
                         MirrorNativeUndo(tracked2);
                     }
@@ -2954,12 +3420,28 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                 else
                 {
                     bool flag = tracked2.Session.Scene.IsValid() && SceneEditorSession.All.Contains(tracked2.Session);
-                    Dictionary<string, ObjectState> dictionary2 = (flag ? SceneAdapter.Capture(tracked2.Session.Scene) : new Dictionary<string, ObjectState>(tracked2.Known));
+                    Dictionary<string, ObjectState> dictionary2 = (flag ? CaptureShown(p.Scene, tracked2) : new Dictionary<string, ObjectState>(tracked2.Known));
+                    // What the editor showed and what was confirmed before this change, to put both back if the engine refuses it.
+                    Dictionary<string, ObjectState> shownBefore = new Dictionary<string, ObjectState>(dictionary2);
+                    Dictionary<string, ObjectState> knownPrior = new Dictionary<string, ObjectState>(StringComparer.Ordinal);
                     foreach (Change change2 in p.Changes)
                     {
+                        if (!knownPrior.ContainsKey(change2.Id))
+                        {
+                            knownPrior[change2.Id] = tracked2.Known.GetValueOrDefault(change2.Id);
+                        }
+                        if ((object)change2.After != null && tracked2.SkippedObjects.Contains(change2.Id))
+                        {
+                            // An object this editor cannot show stays as it is shown here; the host's version is recorded, never applied
+                            // (applying it is what failed) and never sent back.
+                            tracked2.Known[change2.Id] = change2.After;
+                            continue;
+                        }
                         // The user may hold an edit the host has not seen (mid-drag, or not yet sent). It is kept on top of the host's
                         // change instead of failing the session; ChangeRebase never throws on divergence because the host is the authority.
-                        RebaseResult rebase = ChangeRebase.RebaseOntoRemoteChange(change2.Id, tracked2.Known.GetValueOrDefault(change2.Id), dictionary2.GetValueOrDefault(change2.Id), change2.Before, change2.After);
+                        // A skipped object has no edit of this person's: its local side is what the host last confirmed.
+                        ObjectState localSide = tracked2.SkippedObjects.Contains(change2.Id) ? tracked2.Known.GetValueOrDefault(change2.Id) : dictionary2.GetValueOrDefault(change2.Id);
+                        RebaseResult rebase = ChangeRebase.RebaseOntoRemoteChange(change2.Id, tracked2.Known.GetValueOrDefault(change2.Id), localSide, change2.Before, change2.After);
                         rebaseNotices.Add(rebase.Notice);
                         if ((object)rebase.NewLocal == null)
                         {
@@ -2980,7 +3462,22 @@ public sealed class CollaborationSession : EditorEvent.ISceneView, EditorEvent.I
                     }
                     if (flag)
                     {
-                        SceneAdapter.Apply(tracked2.Session, dictionary2);
+                        Exception applyError = TryApply(tracked2)(dictionary2);
+                        if (applyError != null)
+                        {
+                            // Undo the bookkeeping too: the scene shows what it showed before, Known is what it was, and the snapshot
+                            // brings this change in. The person's unsent edits are then exactly Known against the scene, and are replayed.
+                            tracked2.Known = ApplyRecovery.WithPrior(tracked2.Known, knownPrior);
+                            RecoverScene(p.Scene, tracked2, applyError, shownBefore, snapshot: false);
+                            return;
+                        }
+                        foreach (Change applied in p.Changes)
+                        {
+                            if ((object)applied.After == null)
+                            {
+                                tracked2.SkippedObjects.Remove(applied.Id);
+                            }
+                        }
                         tracked2.Session.UndoSystem.Initialize();
                         MirrorNativeUndo(tracked2);
                     }

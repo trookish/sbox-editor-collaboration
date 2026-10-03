@@ -72,7 +72,7 @@ public static class SceneAdapter
         return text;
     }
 
-    public static Dictionary<string, ObjectState> Capture(Scene scene)
+    public static Dictionary<string, ObjectState> Capture(Scene scene, IReadOnlyDictionary<string, ObjectState> confirmed = null, ISet<string> failed = null)
     {
         Dictionary<string, ObjectState> result = new Dictionary<string, ObjectState>();
         skipped.TryGetValue( scene, out Dictionary<string, List<SkippedComponent>> held );
@@ -86,10 +86,28 @@ public static class SceneAdapter
             {
                 if (gameObject.IsValid())
                 {
-                    JsonObject jsonObject = gameObject.Serialize();
-                    if (jsonObject != null)
+                    try
                     {
-                        Flatten(JsonNode.Parse(jsonObject.ToJsonString()).AsObject(), "", rootOrder++);
+                        JsonObject jsonObject = gameObject.Serialize();
+                        if (jsonObject != null)
+                            Flatten(JsonNode.Parse(jsonObject.ToJsonString()).AsObject(), "", rootOrder++);
+                    }
+                    catch (Exception) when (confirmed != null && failed != null)
+                    {
+                        // A broken object is not a deletion. Its host JSON remains unchanged while other objects continue.
+                        string id = gameObject.Id.ToString();
+                        failed.Add(id);
+                        HashSet<string> subtree = new HashSet<string> { id };
+                        bool expanded;
+                        do
+                        {
+                            expanded = false;
+                            foreach (ObjectState child in confirmed.Values)
+                                if (subtree.Contains(child.Parent)) expanded |= subtree.Add(child.Id);
+                        } while (expanded);
+                        foreach (string key in subtree) result.Remove(key);
+                        foreach (string key in subtree)
+                            if (confirmed.TryGetValue(key, out ObjectState previous)) result[key] = previous;
                     }
                 }
             }
