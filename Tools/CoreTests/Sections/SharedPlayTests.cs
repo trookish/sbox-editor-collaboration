@@ -9,5 +9,7 @@ static partial class SharedPlayTests
     public static void Run( Action<bool, string> assert )
     {
         Roster( assert );
+        Whitelist( assert );
+        FreeFly( assert );
     }
 }
