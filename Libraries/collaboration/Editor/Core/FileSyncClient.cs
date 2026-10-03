@@ -89,6 +89,9 @@ public sealed class FileSyncClient : IDisposable
     /// </summary>
     public Action<string> FileChanged { get; set; }
 
+    /// <summary>The session's change log; every project file this client writes, deletes or sends is recorded in it. Null records nothing.</summary>
+    public SessionChangeLog Changes { get; set; }
+
     /// <summary>True once the files a join needed have arrived (or been refused); scene subscription waits for it.</summary>
     public bool JoinReady { get; private set; }
 
@@ -278,6 +281,7 @@ public sealed class FileSyncClient : IDisposable
             failures.Remove( entry.Path );
             Count( entry.Size );
             FileChanged?.Invoke( entry.Path );
+            Changes?.Record( entry.Path, SessionChangeKind.ReceivedFromHost, "the host", entry.Sha256 );
             return;
         }
         int attempts = failures.GetValueOrDefault( entry.Path ) + 1;
@@ -348,6 +352,7 @@ public sealed class FileSyncClient : IDisposable
         index.Invalidate( p.Path );
         known.Remove( p.Path );
         FileChanged?.Invoke( p.Path );
+        Changes?.Record( p.Path, SessionChangeKind.Deleted, "the host" );
     }
 
     // Polls the asset tree a bounded slice per frame: the path list once per cycle, then at most FilesPerFrame files and HashBytesPerFrame
@@ -390,6 +395,7 @@ public sealed class FileSyncClient : IDisposable
                 continue;
             }
             QueueUpload( entry, prior?.Sha256 );
+            Changes?.Record( path, prior == null ? SessionChangeKind.Added : SessionChangeKind.Changed, "you", entry.Sha256 );
         }
         if ( scanPosition < scanPaths.Count ) return;
         if ( !index.Incomplete )
@@ -399,6 +405,7 @@ public sealed class FileSyncClient : IDisposable
                 if ( scanSeen.Contains( prior.Path ) || open.Contains( prior.Path ) || IsBeingFetched( prior.Path ) ) continue;
                 known.Remove( prior.Path );
                 send( new Packet { Kind = "file-delete", Path = prior.Path, BaseSha256 = prior.Sha256 == "" ? null : prior.Sha256 } );
+                Changes?.Record( prior.Path, SessionChangeKind.Deleted, "you" );
             }
         }
         scanPaths = null;
