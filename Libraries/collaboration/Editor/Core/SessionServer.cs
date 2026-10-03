@@ -244,6 +244,7 @@ public sealed partial class SessionServer : IDisposable
                     }
                     p.Peer = m.Peer;
                     if (HandleFilePacket(m, p)) continue;
+                    if (HandlePlayPacket(m, p)) continue;
                     switch (p.Kind)
                     {
                     case "subscribe":
@@ -609,11 +610,20 @@ public sealed partial class SessionServer : IDisposable
     // Features are advertised only when this host can actually serve them: without a project root there are no files to offer.
     private Packet Welcome()
     {
+        var features = new List<string>();
+        if (!string.IsNullOrEmpty(FileProjectRoot))
+        {
+            features.Add(FileSyncLimits.Feature);
+        }
+        if (SharedPlayEnabled)
+        {
+            features.Add(PlayRelayPolicy.Feature);
+        }
         return new Packet
         {
             Kind = "welcome",
             Session = sessionId,
-            Features = string.IsNullOrEmpty(FileProjectRoot) ? null : new List<string> { FileSyncLimits.Feature }
+            Features = features.Count == 0 ? null : features
         };
     }
 
@@ -627,6 +637,7 @@ public sealed partial class SessionServer : IDisposable
         if (members.Remove(member))
         {
             ForgetFileMember(member);
+            ForgetPlayMember(member);
             member.Wire.Dispose();
             if (member.Peer != null)
             {

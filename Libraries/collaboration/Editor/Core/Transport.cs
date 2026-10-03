@@ -154,7 +154,19 @@ public sealed class Wire : IDisposable
         {
             throw new IOException("Connection queue or message limit exceeded; edit retained locally");
         }
+        Interlocked.Add(ref pendingBytes, array.Length);
+        Interlocked.Increment(ref pendingMessages);
     }
+
+    private long pendingBytes;
+
+    private int pendingMessages;
+
+    /// <summary>Bytes of serialised packets queued to this peer and not yet taken by the writer. The shared-play relay reads it to decide that a spectator is behind; nothing else depends on it.</summary>
+    public long PendingBytes => Interlocked.Read(ref pendingBytes);
+
+    /// <summary>Packets queued and not yet written; the queue holds 256, so a relay that wants to stay clear of the limit stops sending well below it.</summary>
+    public int PendingMessages => Volatile.Read(ref pendingMessages);
 
     private async Task Read()
     {
@@ -275,6 +287,8 @@ public sealed class Wire : IDisposable
             bool preamble = sessionKey != null && initiator;
             await foreach (byte[] jsonBytes in outgoing.Reader.ReadAllAsync(stop.Token))
             {
+                Interlocked.Add(ref pendingBytes, -jsonBytes.Length);
+                Interlocked.Decrement(ref pendingMessages);
                 if (preamble)
                 {
                     preamble = false;
