@@ -124,7 +124,7 @@ public sealed partial class SessionServer
         {
             target.Wire.Send( packet );
         }
-        catch ( Exception ex ) when ( ex is IOException or ObjectDisposedException or InvalidOperationException )
+        catch ( Exception )
         {
         }
     }
