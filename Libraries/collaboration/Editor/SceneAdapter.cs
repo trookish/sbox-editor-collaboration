@@ -370,6 +370,17 @@ public static class SceneAdapter
         }
     }
 
+    /// <summary>
+    /// The engine build alone (the module version ids Baseline starts with), sent in the hello so a host can admit a guest whose project
+    /// files differ (they are synchronized after welcome) while still refusing a different engine build.
+    /// </summary>
+    public static string EngineBaseline()
+    {
+        return AdmissionRules.EngineFingerprint(new[] { typeof(Scene).Assembly, typeof(Widget).Assembly }.Select((Assembly x) => x.ManifestModule.ModuleVersionId.ToString()));
+    }
+
+    // includeScenes: false is the source baseline that guards saving and reconnecting. Assets are left out of it because file
+    // synchronization changes them during a session on purpose; what it still guards is code and project configuration.
     public static string Baseline(bool includeScenes = true)
     {
         List<string> list = new List<string> { "teamcreate-1" };
@@ -405,7 +416,7 @@ public static class SceneAdapter
                     default:
                         return false;
                     }
-                }) && !item.EndsWith(".csproj") && !item.EndsWith("_c") && !item.EndsWith("_d") && !item.Contains(".generated.") && (includeScenes || !item.EndsWith(".scene", StringComparison.OrdinalIgnoreCase)))
+                }) && !item.EndsWith(".csproj") && !item.EndsWith("_c") && !item.EndsWith("_d") && !item.Contains(".generated.") && (includeScenes || (!item.EndsWith(".scene", StringComparison.OrdinalIgnoreCase) && JoinReadiness.Classify(text) != ProjectFileKind.Asset)))
                 {
                     list.Add(text + ":" + Convert.ToHexString(SHA256.HashData(MetaFileRules.Canonical(item, File.ReadAllBytes(item)))));
                 }

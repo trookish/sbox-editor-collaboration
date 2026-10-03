@@ -9,7 +9,7 @@ using System.Threading.Tasks;
 
 namespace TeamCreate;
 
-public sealed class SessionServer : IDisposable
+public sealed partial class SessionServer : IDisposable
 {
     private sealed class Member
     {
@@ -211,9 +211,11 @@ public sealed class SessionServer : IDisposable
                         {
                             text = "Project ID differs. Use the same committed ProjectSettings/collaboration.json.";
                         }
-                        if (text == null && !compatibleBaselines.Contains(p.Baseline))
+                        if (text == null)
                         {
-                            text = "Project/scene baseline differs (engine, source, assets or metadata). Sync copies in Git before joining.";
+                            // A peer whose files differ is admitted and synchronized after welcome; only its engine build must match.
+                            text = AdmissionRules.BaselineRefusal(peerManifest: p.ProjectManifest, hostManifest: hostManifest, peerBaseline: p.Baseline,
+                                compatibleBaselines: compatibleBaselines, peerEngine: p.EngineBaseline, hostEngine: HostEngineBaseline);
                         }
                         if (text == null && (string.IsNullOrWhiteSpace(p.Name) || p.Name.Length > 64))
                         {
@@ -241,6 +243,7 @@ public sealed class SessionServer : IDisposable
                         goto IL_0335;
                     }
                     p.Peer = m.Peer;
+                    if (HandleFilePacket(m, p)) continue;
                     switch (p.Kind)
                     {
                     case "subscribe":
@@ -319,11 +322,7 @@ public sealed class SessionServer : IDisposable
                     m.Peer = p.Peer;
                     m.Name = p.Name;
                     m.SteamId = p.SteamId;
-                    m.Wire.Send(new Packet
-                    {
-                        Kind = "welcome",
-                        Session = sessionId
-                    });
+                    m.Wire.Send(Welcome());
                     foreach (Member item in members.Where((Member x) => x.Presence != null))
                     {
                         m.Wire.Send(item.Presence);
@@ -340,6 +339,7 @@ public sealed class SessionServer : IDisposable
                 }
             }
         }
+        PumpFileOutboxes();
     }
 
     // A ping from a peer that predates the digest, or one that names a scene the host does not hold, is answered with the pong alone. Nothing
@@ -511,11 +511,7 @@ public sealed class SessionServer : IDisposable
                                 m.Peer = pending.Hello.Peer;
                                 m.Name = pending.Hello.Name;
                                 m.SteamId = pending.Hello.SteamId;
-                                m.Wire.Send(new Packet
-                                {
-                                    Kind = "welcome",
-                                    Session = sessionId
-                                });
+                                m.Wire.Send(Welcome());
                                 foreach (Member item in members.Where((Member x) => x.Presence != null))
                                 {
                                     m.Wire.Send(item.Presence);
@@ -610,6 +606,17 @@ public sealed class SessionServer : IDisposable
         }
     }
 
+    // Features are advertised only when this host can actually serve them: without a project root there are no files to offer.
+    private Packet Welcome()
+    {
+        return new Packet
+        {
+            Kind = "welcome",
+            Session = sessionId,
+            Features = string.IsNullOrEmpty(FileProjectRoot) ? null : new List<string> { FileSyncLimits.Feature }
+        };
+    }
+
     public void AllowSavedBaseline(string fingerprint)
     {
         compatibleBaselines.Add(fingerprint);
@@ -619,6 +626,7 @@ public sealed class SessionServer : IDisposable
     {
         if (members.Remove(member))
         {
+            ForgetFileMember(member);
             member.Wire.Dispose();
             if (member.Peer != null)
             {

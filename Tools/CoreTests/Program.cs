@@ -4286,9 +4286,9 @@ Assert( AdmissionRules.Evaluate( AdmittedPeerFacts() with { IsFriend = false, Is
     selfLibraryGate == AdmissionRules.LibraryGate,
     "the host's own connection is still refused at the library gate on an old library" );
 Assert( AdmissionRules.Evaluate( AdmittedPeerFacts() with { IsFriend = false, IsHostSelf = true, PeerProjectManifest = "ffff9999" },
-        CollaborationConfig.Defaults(), "1.0.0", "abcd1234", out var selfManifestGate ) is not null &&
-    selfManifestGate == AdmissionRules.ManifestGate,
-    "the host's own connection is still refused at the manifest gate on a different project copy" );
+        CollaborationConfig.Defaults(), "1.0.0", "abcd1234", out var selfManifestGate ) is null &&
+    selfManifestGate is null,
+    "the host's own connection accepts a different project copy for asset sync" );
 
 Assert( AdmissionRules.Evaluate( AdmittedPeerFacts() with { IsOrgMember = false },
         CollaborationConfig.Defaults(), "1.0.0", "abcd1234", out var orgGate ) ==
@@ -4319,10 +4319,9 @@ Assert( AdmissionRules.Evaluate( AdmittedPeerFacts() with { PeerLibraryVersion =
     "a newer peer library is accepted because a more recent peer is compatible" );
 
 Assert( AdmissionRules.Evaluate( AdmittedPeerFacts() with { PeerProjectManifest = "ffff9999" },
-        CollaborationConfig.Defaults(), "1.0.0", "abcd1234", out var manifestGate ) ==
-        "has a different copy of this project (ffff9999 vs abcd1234). Sync the project (Git and Asset Party) before joining." &&
-    manifestGate == AdmissionRules.ManifestGate,
-    "a mismatched project copy is refused at the manifest gate and names both hashes" );
+        CollaborationConfig.Defaults(), "1.0.0", "abcd1234", out var manifestGate ) is null &&
+    manifestGate is null,
+    "a mismatched project copy joins so assets can synchronize" );
 
 Assert( AdmissionRules.Evaluate( AdmittedPeerFacts() with { PeerProjectManifest = "ffff9999" },
         CollaborationConfig.Defaults(), "1.0.0", "", out var unenforcedManifestGate ) is null &&
@@ -4359,9 +4358,9 @@ Assert( AdmissionRules.Evaluate( admissionAllWrong with { IdentityVerified = tru
     "library is evaluated before manifest" );
 Assert( AdmissionRules.Evaluate( admissionAllWrong with
         { IdentityVerified = true, IsFriend = true, IsOrgMember = true, PeerLibraryVersion = "1.0.0" },
-        admissionConfig, "1.0.0", "abcd1234", out orderedGate ) != null &&
-    orderedGate == AdmissionRules.ManifestGate,
-    "manifest is the final gate" );
+        admissionConfig, "1.0.0", "abcd1234", out orderedGate ) is null &&
+    orderedGate is null,
+    "manifest differences do not refuse admission" );
 
 // The same trailing-zero rule applies on the admission side: a peer that reports 1.1 runs
 // the release the settings file pins as 1.1.0.
@@ -4413,11 +4412,8 @@ Assert( oversizedVersionRefusal is not null &&
 var oversizedManifestRefusal = AdmissionRules.Evaluate( AdmittedPeerFacts() with
         { PeerProjectManifest = new string( 'h', 5000 ) },
     CollaborationConfig.Defaults(), "1.0.0", "abcd1234", out var oversizedManifestGate );
-Assert( oversizedManifestRefusal is not null &&
-    oversizedManifestRefusal.Length <= CollaborationDiagnostics.MaxDiagnosticLength &&
-    !oversizedManifestRefusal.Contains( '\r' ) && !oversizedManifestRefusal.Contains( '\n' ) &&
-    oversizedManifestGate == AdmissionRules.ManifestGate,
-    "an oversized peer project manifest is bounded in the refusal" );
+Assert( oversizedManifestRefusal is null && oversizedManifestGate is null,
+    "an oversized peer project manifest does not block file reconciliation" );
 
 // A blank host manifest is a project that never produced one, so there is nothing to
 // compare and the gate stays open instead of refusing every peer over an empty value.

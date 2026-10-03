@@ -15,9 +15,41 @@ public static class ProjectManifest
 
     private static readonly string[] ExcludedExtensions = new string[6] { ".user", ".csproj", ".dll", ".pdb", ".cache", ".tmp" };
 
+    /// <summary>
+    /// Whether a project-relative path ("/" separators) is one the walk below could yield: under an included top-level folder, inside no
+    /// excluded folder (library-internal and build output) and without an excluded extension. File synchronization refuses any other path,
+    /// so a peer cannot write into .git, .collaboration or a build folder through a name the manifest would never list.
+    /// </summary>
+    public static bool Covers(string relativePath)
+    {
+        if (string.IsNullOrWhiteSpace(relativePath))
+        {
+            return false;
+        }
+        string[] segments = relativePath.Replace('\\', '/').Split('/');
+        if (segments.Length < 2 || !IncludeRoots.Any((string x) => string.Equals(x, segments[0], StringComparison.OrdinalIgnoreCase)))
+        {
+            return false;
+        }
+        if (segments.Take(segments.Length - 1).Any((string s) => ExcludedDirectories.Any((string x) => string.Equals(x, s, StringComparison.OrdinalIgnoreCase))))
+        {
+            return false;
+        }
+        return !ExcludedExtensions.Any((string x) => relativePath.EndsWith(x, StringComparison.OrdinalIgnoreCase));
+    }
+
     public static IEnumerable<string> EnumerateInputs(string projectRoot)
     {
         bool incomplete;
+        return EnumerateInputs(projectRoot, null, out incomplete);
+    }
+
+    /// <summary>
+    /// The same inputs, and whether a folder could not be listed. File synchronization needs the flag: a path missing from an incomplete
+    /// walk is not a deleted file, and treating it as one would delete it on every other machine.
+    /// </summary>
+    public static IEnumerable<string> EnumerateInputs(string projectRoot, out bool incomplete)
+    {
         return EnumerateInputs(projectRoot, null, out incomplete);
     }
 
