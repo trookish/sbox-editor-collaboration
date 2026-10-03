@@ -37,6 +37,12 @@ if (args.Length >= 2 && args[0] == "worker")
     Environment.Exit(await WorkerConformance.Run(args[1], args.Length >= 3 ? args[2] : null));
 }
 
+// `tunnel-e2e <verified exe>` exercises a guest across the real internet, not merely a local relay.
+if ( args.Length >= 2 && args[0] == "tunnel-e2e" )
+{
+    Environment.Exit( await TunnelE2e.Run( args[1] ) );
+}
+
 // `embedded` runs the same conformance suite against the host-run relay (Connect/EmbeddedRelay.cs), started in-process. See EmbeddedConformance.cs.
 if (args.Length >= 1 && args[0] == "embedded")
 {

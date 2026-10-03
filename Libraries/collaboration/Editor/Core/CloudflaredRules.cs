@@ -95,6 +95,13 @@ public static class CloudflaredRules
         return "tunnel --url http://localhost:" + localPort.ToString( CultureInfo.InvariantCulture ) + " --no-autoupdate";
     }
 
+    /// <summary>HttpListener's localhost URL reservation rejects the public Host header unless cloudflared rewrites it.</summary>
+    public static string BuildEmbeddedArguments( int localPort ) => BuildArguments( localPort ) + " --http-host-header localhost:" + localPort.ToString( CultureInfo.InvariantCulture );
+
+    /// <summary>True for cloudflared's informational "Registered tunnel connection" line (Tools/TunnelSmoke/sample-output.txt); an error-level line naming it is not.</summary>
+    public static bool IsRegisteredLine( string line ) => line != null && line.Length <= MaxLineChars
+        && line.Contains( " INF Registered tunnel connection ", StringComparison.Ordinal );
+
     /// <summary>
     /// Null when a downloaded executable may be run, otherwise the reason it may not. It may only when it has content and its SHA-256 equals the pinned
     /// value, compared in constant time. The pinned value is the code's own, so one that is malformed (wrong length, not hexadecimal) refuses

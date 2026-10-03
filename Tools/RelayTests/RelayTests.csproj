@@ -13,6 +13,7 @@
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <Compile Include="*.cs" />
+    <Compile Include="../../Libraries/collaboration/Editor/CloudflaredPin.cs" Link="CloudflaredPin.cs" />
     <!-- The engine-free library core, exactly as CoreTests compiles it. -->
     <Compile Include="../../Libraries/collaboration/Editor/Core/*.cs" Link="Core/%(Filename)%(Extension)" />
     <!-- The relay server sources, compiled in rather than referenced so the tests host it in-process. -->
