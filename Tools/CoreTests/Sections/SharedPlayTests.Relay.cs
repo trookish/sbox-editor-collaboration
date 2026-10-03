@@ -126,7 +126,6 @@ static partial class SharedPlayTests
             rig.Join( "Player", true );
             rig.Join( "Spec1", true );
             rig.Join( "Spec2", true );
-            rig.Join( "Outsider", false );
             assert( rig.Seen["Player"].First( p => p.Kind == "welcome" ).Features?.Contains( "shared-play" ) == true, "play_server_welcome_advertises_shared_play_when_enabled" );
 
             // Who plays.
@@ -136,7 +135,6 @@ static partial class SharedPlayTests
             var start = rig.Of( "Spec1", "play-start" )[0];
             string run = start.RuntimeRunId;
             assert( start.Peer == rig.Peers["Player"] && start.Scene == PlayScene && start.Name == "Player" && !string.IsNullOrEmpty( run ), "play_server_start_is_broadcast_with_player_scene_and_run" );
-            assert( rig.Of( "Outsider", "play-start" ).Count == 0, "play_server_peers_that_did_not_opt_in_see_nothing" );
 
             // The single-player rule, on the real server.
             rig.Send( "Spec1", new Packet { Kind = "play-start", Scene = PlayScene } );
@@ -145,9 +143,8 @@ static partial class SharedPlayTests
             assert( rig.Of( "Spec1", "play-refused" )[0].Notice == "Player is already playing. Wait until they stop, or ask them to stop. Your run is local and is not shown to the others.", "play_server_second_player_gets_the_formal_refusal" );
             assert( rig.Of( "Player", "play-refused" ).Count == 0 && rig.Of( "Spec2", "play-refused" ).Count == 0 && rig.Of( "Spec1", "play-start" ).Count == 1 && rig.Of( "Spec2", "play-start" ).Count == 1, "play_server_refusal_goes_only_to_the_refused_and_changes_nothing" );
             rig.Send( "Spec2", new Packet { Kind = "play-start", Scene = "../../etc/passwd" } );
-            rig.Send( "Outsider", new Packet { Kind = "play-start", Scene = PlayScene } );
             rig.Settle();
-            assert( rig.Of( "Spec2", "play-start" ).Count == 1 && rig.Of( "Outsider", "play-start" ).Count == 0 && !rig.Seen.Values.SelectMany( s => s ).Any( p => p.Kind == "fatal" ), "play_server_invalid_and_non_opted_in_starts_are_dropped_without_fatal" );
+            assert( rig.Of( "Spec2", "play-start" ).Count == 1 && !rig.Seen.Values.SelectMany( s => s ).Any( p => p.Kind == "fatal" ), "play_server_invalid_starts_are_dropped_without_fatal" );
 
             // Frames: to spectators only, never echoed to the player.
             rig.Send( "Player", Frame( run, 1, key: true ) );
@@ -155,7 +152,6 @@ static partial class SharedPlayTests
             rig.PumpFor( () => rig.Of( "Spec1", "play-frame" ).Count == 2 && rig.Of( "Spec2", "play-frame" ).Count == 2 );
             rig.Settle();
             assert( rig.Of( "Player", "play-frame" ).Count == 0, "play_server_never_echoes_frames_to_the_player" );
-            assert( rig.Of( "Outsider", "play-frame" ).Count == 0, "play_server_frames_skip_peers_that_did_not_opt_in" );
             assert( rig.Of( "Spec1", "play-frame" ).Select( f => f.RuntimeSequence ).SequenceEqual( new long?[] { 1, 2 } ) && rig.Of( "Spec1", "play-frame" )[0].Peer == rig.Peers["Player"], "play_server_frames_arrive_in_order_stamped_with_the_player" );
 
             // A frame from anybody but the player, or for another run, goes nowhere.
@@ -201,6 +197,24 @@ static partial class SharedPlayTests
             rig.Send( "Spec1", new Packet { Kind = "leave" } );
             rig.PumpFor( () => rig.Of( "Player", "play-stop" ).Count == 2 && rig.Of( "Spec2", "play-stop" ).Count == 2 );
             assert( rig.Of( "Spec2", "play-stop" )[1].RuntimeRunId == second && rig.Of( "Spec2", "play-stop" )[1].Peer == rig.Peers["Spec1"], "play_server_player_leaving_ends_the_run_for_everyone" );
+        }
+
+        // A peer that did not opt in sees nothing. (A separate rig: the session holds the host and three guests at most.)
+        using ( var rig = StartPlayRig() )
+        {
+            rig.Join( "Player", true );
+            rig.Join( "Spec1", true );
+            rig.Join( "Outsider", false );
+            rig.Send( "Player", new Packet { Kind = "play-start", Scene = PlayScene } );
+            rig.PumpFor( () => rig.Of( "Spec1", "play-start" ).Count == 1 );
+            string run = rig.Of( "Spec1", "play-start" )[0].RuntimeRunId;
+            rig.Send( "Outsider", new Packet { Kind = "play-start", Scene = PlayScene } );
+            rig.Send( "Player", Frame( run, 1, key: true ) );
+            rig.PumpFor( () => rig.Of( "Spec1", "play-frame" ).Count == 1 );
+            rig.Settle();
+            assert( rig.Of( "Outsider", "play-start" ).Count == 0, "play_server_peers_that_did_not_opt_in_see_nothing" );
+            assert( rig.Of( "Outsider", "play-frame" ).Count == 0, "play_server_frames_skip_peers_that_did_not_opt_in" );
+            assert( !rig.Seen.Values.SelectMany( x => x ).Any( x => x.Kind == "fatal" ), "play_server_a_non_opted_in_start_is_dropped_without_fatal" );
         }
 
         // Disconnect without a goodbye (the connection drops), the host being the player, and a late opt-in.
