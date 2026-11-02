@@ -392,6 +392,7 @@ static class PolishTests
         private int port;
 
         private int joined;
+        private readonly Dictionary<string, string> accounts = new();
 
         private readonly List<FakeGuest> guests = new();
 
@@ -420,12 +421,18 @@ static class PolishTests
         {
             joined++;
             var guest = new FakeGuest { Wire = Wire.Connect( "127.0.0.1", port ).GetAwaiter().GetResult(), PeerId = peer ?? Guid.NewGuid().ToString( "N" ) };
+            // An editor reconnecting under its own collaborator ID is still signed in to its own account: the host binds the ID to it.
+            if ( !accounts.TryGetValue( guest.PeerId, out string account ) )
+            {
+                account = ( 76561198000000001L + joined ).ToString();
+                accounts[guest.PeerId] = account;
+            }
             guests.Add( guest );
             guest.Wire.Send( new Packet
             {
                 Kind = "hello", Peer = guest.PeerId, ProtocolVersion = Protocol.CurrentVersion, Mode = CollaborationMode.Source,
                 Name = name, Token = "test-token", Project = "test-project", Baseline = "guest-baseline", EngineBaseline = "engine-1",
-                SteamId = ( 76561198000000001L + joined ).ToString(), SteamToken = "a-realistic-session-token", OrgIdent = "cyn", LibraryVersion = "1.1.1", ProjectManifest = "guest-manifest"
+                SteamId = account, SteamToken = "a-realistic-session-token", OrgIdent = "cyn", LibraryVersion = "1.1.1", ProjectManifest = "guest-manifest"
             } );
             return guest;
         }

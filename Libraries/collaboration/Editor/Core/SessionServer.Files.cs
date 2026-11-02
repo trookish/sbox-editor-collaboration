@@ -319,7 +319,7 @@ public sealed partial class SessionServer
         FileNotice = notice;
         foreach ( var target in members.Where( x => x == member || ( otherPeer != null && x.Peer == otherPeer ) ).ToList() )
         {
-            target.Wire.Send( new Packet { Kind = "file-notice", Notice = notice } );
+            SendTo( target, new Packet { Kind = "file-notice", Notice = notice } );
         }
     }
 

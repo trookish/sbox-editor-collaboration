@@ -391,7 +391,7 @@ public sealed class RelayHost : IDisposable
         {
             channels[channel] = pipe;
         }
-        Accepted.Enqueue(new Wire(pipe, null, sessionKey, initiator: false));
+        Accepted.Enqueue(new Wire(pipe, null, sessionKey, initiator: false, accepted: true));
     }
 
     private void OnPipeClosed(IRelaySocket from, uint channel)

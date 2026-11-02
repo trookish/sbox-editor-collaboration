@@ -25,7 +25,7 @@ public sealed partial class SessionServer
         if ( BlobStore == null ) return null;
         if ( !blobMembers.TryGetValue( member, out BlobExchange exchange ) )
         {
-            blobMembers[member] = exchange = new BlobExchange( BlobStore, packet => member.Wire.Send( packet ), () => DateTime.UtcNow, blobBudget );
+            blobMembers[member] = exchange = new BlobExchange( BlobStore, packet => SendTo( member, packet ), () => DateTime.UtcNow, blobBudget );
         }
         return exchange;
     }
@@ -63,8 +63,20 @@ public sealed partial class SessionServer
     {
         foreach ( KeyValuePair<Member, BlobExchange> pair in blobMembers.ToArray() )
         {
-            pair.Value.Pump();
-            ReportDropped( pair.Key, pair.Value );
+            if ( !members.Contains( pair.Key ) || pair.Key.Dropped != null )
+            {
+                continue;
+            }
+            // One member's geometry transfer failing costs that member alone; it must never escape the host's pump.
+            try
+            {
+                pair.Value.Pump();
+                ReportDropped( pair.Key, pair.Value );
+            }
+            catch ( Exception error )
+            {
+                pair.Key.Dropped = CollaborationTransportDiagnostics.BoundedExceptionDiagnostic( "Geometry transfer failed: ", error );
+            }
         }
         if ( BlobStore != null && DateTime.UtcNow - lastBlobPrune > TimeSpan.FromMinutes( 5 ) )
         {
@@ -81,7 +93,7 @@ public sealed partial class SessionServer
         {
             exchange.TakeNotices();
             BlobNotice = item.Reason;
-            member.Wire.Send( new Packet
+            SendTo( member, new Packet
             {
                 Kind = "reject",
                 Id = item.Packet.Id,

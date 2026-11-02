@@ -24,6 +24,14 @@ public sealed partial class SessionServer : IDisposable
         public Packet Presence;
 
         public DateTime LastSeen = DateTime.UtcNow;
+
+        public readonly DateTime Accepted = DateTime.UtcNow;
+
+        // Why a send to this member failed (its queue is full or its connection closed), or null. The member is removed at the next safe point
+        // of the pump, never in the middle of a loop over the members, and nothing more is sent to it meanwhile.
+        public string Dropped;
+
+        public int ProtocolErrors;
     }
 
     private sealed class Refusal
@@ -67,6 +75,15 @@ public sealed partial class SessionServer : IDisposable
     private readonly FileStream journal;
 
     public const int MaxPendingVerifications = 8;
+
+    /// <summary>Messages from one member the host could not process before it closes that member's connection. A correct editor sends none.</summary>
+    public const int MaxProtocolErrors = 16;
+
+    /// <summary>How long a connection may stay without saying hello. An unproven connection holds a slot, so it is not allowed to hold it long.</summary>
+    public static readonly TimeSpan HandshakeLimit = TimeSpan.FromSeconds(10);
+
+    /// <summary>How long a member may stay silent before it is treated as gone. Members ping every two seconds. Tests shorten it.</summary>
+    public TimeSpan SilenceLimit { get; set; } = TimeSpan.FromSeconds(15);
 
     private readonly List<PendingVerification> pendingVerifications = new List<PendingVerification>();
 
@@ -184,7 +201,11 @@ public sealed partial class SessionServer : IDisposable
         Member[] array = members.ToArray();
         foreach (Member m in array)
         {
-            if (m.Wire.StoredFailure != null || DateTime.UtcNow - m.LastSeen > TimeSpan.FromSeconds(15L))
+            if (!members.Contains(m))
+            {
+                continue;
+            }
+            if (m.Dropped != null || m.Wire.StoredFailure != null || IsSilent(m))
             {
                 Remove(m);
                 continue;
@@ -192,7 +213,8 @@ public sealed partial class SessionServer : IDisposable
             int num = 64;
             while (true)
             {
-                if (num-- <= 0 || !NextPacket(m, out var p))
+                // A member removed or dropped by an earlier packet (its own leave, a replacement, a failed send) is not served further.
+                if (num-- <= 0 || m.Dropped != null || !members.Contains(m) || !NextPacket(m, out var p))
                 {
                     break;
                 }
@@ -202,6 +224,11 @@ public sealed partial class SessionServer : IDisposable
                     string text;
                     if (m.Peer == null)
                     {
+                        if (pendingVerifications.Any((PendingVerification v) => v.Member == m))
+                        {
+                            // The same editor asking again while its first hello is being verified: that answer will serve both.
+                            continue;
+                        }
                         text = Protocol.GetHandshakeError(p, requireValidPeer: true);
                         if (text == null && p.Token != token)
                         {
@@ -226,11 +253,8 @@ public sealed partial class SessionServer : IDisposable
                             RejectWith(m, "fatal", text);
                             continue;
                         }
-                        text = SteamIdentityAdmission.GetDuplicateError(p.SteamId, RosterSteamIds(m));
-                        if (text != null)
-                        {
-                            goto IL_0335;
-                        }
+                        // Whether the account is already here is decided after verification: a proven account that reconnects replaces its
+                        // own old connection, so the check cannot come first.
                         if (asyncVerifier != null)
                         {
                             if (!TryDeferVerification(m, p))
@@ -239,8 +263,8 @@ public sealed partial class SessionServer : IDisposable
                             }
                             continue;
                         }
-                        text = SteamIdentityAdmission.GetVerificationError(VerifyVerdict(p), AllowUnverifiedPeers);
-                        goto IL_0335;
+                        Admit(m, p, VerifyVerdict(p), "reject");
+                        continue;
                     }
                     p.Peer = m.Peer;
                     if (HandleFilePacket(m, p)) continue;
@@ -253,14 +277,14 @@ public sealed partial class SessionServer : IDisposable
                         {
                             throw new InvalidOperationException("Scene must be under Assets/scenes");
                         }
-                        m.Wire.Send(authority.Subscribe(p));
+                        SendTo(m, authority.Subscribe(p));
                         break;
                     case "edit":
                     {
                         Packet packet = authority.Apply(p);
                         if (packet.Kind == "reject")
                         {
-                            m.Wire.Send(packet);
+                            SendTo(m, packet);
                         }
                         else
                         {
@@ -274,7 +298,7 @@ public sealed partial class SessionServer : IDisposable
                         Packet packet = authority.ApplySettings(p);
                         if (packet.Kind == "reject")
                         {
-                            m.Wire.Send(packet);
+                            SendTo(m, packet);
                         }
                         else
                         {
@@ -283,15 +307,21 @@ public sealed partial class SessionServer : IDisposable
                         break;
                     }
                     case "presence":
+                        if (!double.IsFinite(p.SentMs))
+                        {
+                            throw new InvalidOperationException("The presence update carried a time that is not a finite number.");
+                        }
                         p.Name = m.Name;
                         // The account the host admitted, never whatever the sender wrote: this is what every editor looks the profile
                         // picture up by, so a guest must not be able to show someone else's.
                         p.SteamId = m.SteamId;
-                        m.Presence = p;
+                        // Relayed before it is kept: a presence that cannot be relayed fails here, for its sender alone, and is never
+                        // handed to the people who join later.
                         Broadcast(p);
+                        m.Presence = p;
                         break;
                     case "ping":
-                        m.Wire.Send(new Packet
+                        SendTo(m, new Packet
                         {
                             Kind = "pong"
                         });
@@ -303,43 +333,21 @@ public sealed partial class SessionServer : IDisposable
                     default:
                         throw new InvalidOperationException("Unknown message type");
                     }
-                    goto end_IL_0174;
-                    IL_0335:
-                    if (text != null)
-                    {
-                        Reject(m, text);
-                        continue;
-                    }
-                    text = AdmissionGateError(p);
-                    if (text != null)
-                    {
-                        Reject(m, text);
-                        continue;
-                    }
-                    text = ParticipantCapError(m, p.Peer);
-                    if (text != null)
-                    {
-                        Reject(m, text);
-                        continue;
-                    }
-                    Member[] array2 = members.Where((Member x) => x != m && x.Peer == p.Peer).ToArray();
-                    foreach (Member member in array2)
-                    {
-                        Remove(member);
-                    }
-                    m.Peer = p.Peer;
-                    m.Name = p.Name;
-                    m.SteamId = p.SteamId;
-                    m.Wire.Send(Welcome());
-                    foreach (Member item in members.Where((Member x) => x.Presence != null))
-                    {
-                        m.Wire.Send(item.Presence);
-                    }
-                    end_IL_0174:;
                 }
                 catch (Exception error)
                 {
-                    m.Wire.Send(new Packet
+                    // The packet is at fault, so its sender alone hears about it. Every send here is guarded: a failure to tell the sender
+                    // must not escape the pump, which would end the session for everybody.
+                    if (m.Dropped != null || !members.Contains(m))
+                    {
+                        break;
+                    }
+                    if (++m.ProtocolErrors >= MaxProtocolErrors)
+                    {
+                        RejectWith(m, "fatal", "The host closed this connection because it kept sending messages the host could not process.");
+                        break;
+                    }
+                    SendTo(m, new Packet
                     {
                         Kind = "fatal",
                         Error = CollaborationTransportDiagnostics.BoundedExceptionDiagnostic("Host processing failed: ", error)
@@ -349,6 +357,135 @@ public sealed partial class SessionServer : IDisposable
         }
         PumpFileOutboxes();
         PumpBlobs();
+        RemoveDropped();
+    }
+
+    // Silence is measured from the last frame the wire read, not the last one the pump handled. A connection that has not said hello is
+    // held to the shorter handshake limit, counted from when it arrived, unless a hello is already waiting or being verified.
+    private bool IsSilent(Member m)
+    {
+        DateTime now = DateTime.UtcNow;
+        DateTime heard = m.Wire.LastReceivedUtc > m.LastSeen ? m.Wire.LastReceivedUtc : m.LastSeen;
+        if (now - heard > SilenceLimit)
+        {
+            return true;
+        }
+        return m.Peer == null && now - m.Accepted > HandshakeLimit && m.Wire.Incoming.IsEmpty && !pendingVerifications.Any((PendingVerification v) => v.Member == m);
+    }
+
+    /// <summary>
+    /// Sends to one member and reports whether it was queued. A full queue or a closed connection marks that member dropped; it is removed
+    /// at the next safe point and nobody else is affected. A packet that cannot be written at all is the packet's fault, not the member's,
+    /// so that exception is left to reach the handler of whoever sent it.
+    /// </summary>
+    private bool SendTo(Member target, Packet packet)
+    {
+        if (target.Dropped != null)
+        {
+            return false;
+        }
+        try
+        {
+            target.Wire.Send(packet);
+            return true;
+        }
+        catch (FrameTooLargeException)
+        {
+            throw;
+        }
+        catch (IOException error)
+        {
+            target.Dropped = CollaborationTransportDiagnostics.BoundedExceptionDiagnostic("Send failed: ", error);
+            return false;
+        }
+        catch (ObjectDisposedException error)
+        {
+            target.Dropped = CollaborationTransportDiagnostics.BoundedExceptionDiagnostic("Send failed: ", error);
+            return false;
+        }
+    }
+
+    private void RemoveDropped()
+    {
+        foreach (Member member in members.Where((Member x) => x.Dropped != null).ToArray())
+        {
+            Remove(member);
+        }
+    }
+
+    // One admission path for both verification modes. A refusal of the identity uses refusalKind (the synchronous path has always answered
+    // "reject", the deferred one "fatal"); a refusal by the project's admission rules or the participant cap is always "reject".
+    private void Admit(Member m, Packet hello, SteamTokenVerdict verdict, string refusalKind)
+    {
+        string text = SteamIdentityAdmission.GetVerificationError(verdict, AllowUnverifiedPeers);
+        List<Member> replaced = null;
+        if (text == null)
+        {
+            text = IdentityConflict(m, hello, verdict == SteamTokenVerdict.Verified, out replaced);
+        }
+        if (text != null)
+        {
+            RejectWith(m, refusalKind, text);
+            return;
+        }
+        text = AdmissionGateError(hello) ?? ParticipantCapError(m, replaced);
+        if (text != null)
+        {
+            Reject(m, text);
+            return;
+        }
+        foreach (Member old in replaced)
+        {
+            Remove(old);
+        }
+        m.Peer = hello.Peer;
+        m.Name = hello.Name;
+        m.SteamId = hello.SteamId;
+        if (!SendTo(m, Welcome()))
+        {
+            return;
+        }
+        foreach (Member item in members.Where((Member x) => x.Presence != null).ToArray())
+        {
+            SendTo(m, item.Presence);
+        }
+    }
+
+    /// <summary>
+    /// Which members a joining editor replaces, or why it may not join. A collaborator ID belongs to the account that first used it: the same
+    /// account under the same ID is the same editor reconnecting and replaces its old connection, another account claiming it is refused. A
+    /// proven account under a new ID is the same person whose editor restarted, so its old connection is replaced at once instead of being
+    /// refused until it times out; an unproven one cannot show that and is refused as a duplicate.
+    /// </summary>
+    private string IdentityConflict(Member joining, Packet hello, bool proven, out List<Member> replaced)
+    {
+        replaced = members.Where((Member x) => x != joining && x.Peer != null && x.Peer == hello.Peer).ToList();
+        if (replaced.Any((Member x) => !SameAccount(x.SteamId, hello.SteamId)))
+        {
+            return "That collaborator ID belongs to another account in this session.";
+        }
+        if (proven)
+        {
+            List<Member> previous = replaced;
+            replaced.AddRange(members.Where((Member x) => x != joining && x.Peer != null && !previous.Contains(x) && SameAccount(x.SteamId, hello.SteamId)).ToList());
+        }
+        List<Member> leaving = replaced;
+        return SteamIdentityAdmission.GetDuplicateError(hello.SteamId, from x in members
+            where x != joining && x.SteamId != null && !leaving.Contains(x)
+            select x.SteamId);
+    }
+
+    private static bool SameAccount(string a, string b)
+    {
+        if (a == null || b == null)
+        {
+            return a == b;
+        }
+        if (SteamIdentityRules.TryParse(a, out var left) && SteamIdentityRules.TryParse(b, out var right))
+        {
+            return string.Equals(SteamIdentityRules.Canonical(left), SteamIdentityRules.Canonical(right), StringComparison.Ordinal);
+        }
+        return string.Equals(a, b, StringComparison.Ordinal);
     }
 
     // A ping from a peer that predates the digest, or one that names a scene the host does not hold, is answered with the pong alone. Nothing
@@ -373,7 +510,7 @@ public sealed partial class SessionServer : IDisposable
         if (verdict == DriftVerdict.Resync)
         {
             // The same packet a subscribe is answered with: the scene already exists, so this only reads the host's state.
-            member.Wire.Send(authority.Subscribe(new Packet
+            SendTo(member, authority.Subscribe(new Packet
             {
                 Scene = ping.DigestScene
             }));
@@ -420,9 +557,9 @@ public sealed partial class SessionServer : IDisposable
 
     // Counted at the moment of admission, not on arrival: an unproven socket is not a participant, and a guest reconnecting under the same peer id
     // replaces its old connection (removed right after this check), so it is not counted twice. The host is one of the participants.
-    private string ParticipantCapError(Member joining, string peer)
+    private string ParticipantCapError(Member joining, List<Member> replaced)
     {
-        int others = members.Count((Member x) => x != joining && x.Peer != null && x.Peer != peer);
+        int others = members.Count((Member x) => x != joining && x.Peer != null && !replaced.Contains(x));
         return SessionLimits.AdmitGuest(others);
     }
 
@@ -457,7 +594,7 @@ public sealed partial class SessionServer : IDisposable
         {
             return false;
         }
-        if (pendingVerifications.Count >= 8)
+        if (pendingVerifications.Count >= MaxPendingVerifications)
         {
             return false;
         }
@@ -487,7 +624,8 @@ public sealed partial class SessionServer : IDisposable
             if (pending.Task.IsCompleted)
             {
                 pendingVerifications.RemoveAt(num);
-                if (pending.Member.Wire != null)
+                // A guest that left while it was being checked is forgotten: its verdict has nobody to answer.
+                if (members.Contains(pending.Member) && pending.Member.Dropped == null)
                 {
                     SteamTokenVerdict verdict;
                     try
@@ -498,48 +636,7 @@ public sealed partial class SessionServer : IDisposable
                     {
                         verdict = SteamTokenVerdict.ServiceUnavailable;
                     }
-                    string verificationError = SteamIdentityAdmission.GetVerificationError(verdict, AllowUnverifiedPeers);
-                    if (verificationError != null)
-                    {
-                        RejectWith(pending.Member, "fatal", verificationError);
-                    }
-                    else
-                    {
-                        string duplicateError = SteamIdentityAdmission.GetDuplicateError(pending.Hello.SteamId, RosterSteamIds(pending.Member));
-                        if (duplicateError != null)
-                        {
-                            RejectWith(pending.Member, "fatal", duplicateError);
-                        }
-                        else
-                        {
-                            string text = AdmissionGateError(pending.Hello);
-                            if (text == null)
-                            {
-                                text = ParticipantCapError(pending.Member, pending.Hello.Peer);
-                            }
-                            if (text != null)
-                            {
-                                Reject(pending.Member, text);
-                            }
-                            else
-                            {
-                                Member m = pending.Member;
-                                Member[] array = members.Where((Member x) => x != m && x.Peer == pending.Hello.Peer).ToArray();
-                                foreach (Member member in array)
-                                {
-                                    Remove(member);
-                                }
-                                m.Peer = pending.Hello.Peer;
-                                m.Name = pending.Hello.Name;
-                                m.SteamId = pending.Hello.SteamId;
-                                m.Wire.Send(Welcome());
-                                foreach (Member item in members.Where((Member x) => x.Presence != null))
-                                {
-                                    m.Wire.Send(item.Presence);
-                                }
-                            }
-                        }
-                    }
+                    Admit(pending.Member, pending.Hello, verdict, "fatal");
                 }
             }
         }
@@ -574,7 +671,11 @@ public sealed partial class SessionServer : IDisposable
         catch (IOException)
         {
         }
+        catch (ObjectDisposedException)
+        {
+        }
         members.Remove(member);
+        pendingVerifications.RemoveAll((PendingVerification v) => v.Member == member);
         refusals.Add(new Refusal
         {
             Wire = member.Wire,
@@ -598,32 +699,21 @@ public sealed partial class SessionServer : IDisposable
         }
     }
 
-    private IEnumerable<string> RosterSteamIds(Member joining)
-    {
-        return from x in members
-            where x != joining && x.SteamId != null
-            select x.SteamId;
-    }
-
     private SteamTokenVerdict VerifyVerdict(Packet p)
     {
         return verifyVerdict?.Invoke(p) ?? SteamTokenVerdict.ServiceUnavailable;
     }
 
+    /// <summary>
+    /// Sends one packet to every admitted member. A recipient whose queue is full or whose connection closed is dropped on its own (see
+    /// <see cref="SendTo"/>); a packet that cannot be written at all fails on the first recipient and is thrown before anyone else is
+    /// tried, so it is refused once, for its sender, instead of costing every recipient the session.
+    /// </summary>
     private void Broadcast(Packet packet)
     {
-        Member[] array = members.Where((Member x) => x.Peer != null).ToArray();
-        foreach (Member member in array)
+        foreach (Member member in members.Where((Member x) => x.Peer != null && x.Dropped == null).ToArray())
         {
-            try
-            {
-                member.Wire.Send(packet);
-            }
-            catch (Exception error)
-            {
-                Failure = CollaborationTransportDiagnostics.BoundedExceptionDiagnostic("Broadcast failed: ", error);
-                Remove(member);
-            }
+            SendTo(member, packet);
         }
     }
 
@@ -657,6 +747,7 @@ public sealed partial class SessionServer : IDisposable
             ForgetFileMember(member);
             ForgetBlobMember(member);
             ForgetPlayMember(member);
+            pendingVerifications.RemoveAll((PendingVerification v) => v.Member == member);
             member.Wire.Dispose();
             if (member.Peer != null)
             {

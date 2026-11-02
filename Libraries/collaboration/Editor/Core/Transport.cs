@@ -83,20 +83,41 @@ public sealed class Wire : IDisposable
 
     public string StoredFailure => (Failure == null) ? null : CollaborationTransportDiagnostics.BoundedStoredDiagnostic(Failure);
 
-    public Wire(TcpClient socket, byte[] sessionKey = null, bool initiator = false)
-        : this(OpenTcp(socket), socket, sessionKey, initiator)
+    public Wire(TcpClient socket, byte[] sessionKey = null, bool initiator = false, bool accepted = false)
+        : this(OpenTcp(socket), socket, sessionKey, initiator, accepted)
     {
     }
 
     // The framing, encryption and sequencing all live above this constructor and see only a byte
     // stream, so a TCP socket and a relay-carried pipe are interchangeable. `owner` is what closes the
     // underlying resource (the TcpClient, or the relay socket); when it is null the stream closes itself.
-    public Wire(Stream stream, IDisposable owner, byte[] sessionKey = null, bool initiator = false)
+    /// <summary>Largest frame a peer may send before its first packet has arrived. A hello is a few hundred bytes, so a connection that has not
+    /// said who it is never makes the host reserve a full-size frame for it.</summary>
+    public const int FirstFrameLimit = 256 * 1024;
+
+    /// <summary>Largest frame either side accepts once the connection has carried a packet.</summary>
+    public const int MaxFrame = 8 * 1024 * 1024;
+
+    // A connection the host accepted (TCP listener or relay) is held to FirstFrameLimit until its first packet arrives.
+    private readonly bool accepted;
+
+    private long lastReceivedTicks = DateTime.UtcNow.Ticks;
+
+    /// <summary>When the last whole frame arrived from the peer, measured as it is read rather than when the host gets round to handling it,
+    /// so a host that stalls (a hotload, a long save) never mistakes a connected peer for a silent one.</summary>
+    public DateTime LastReceivedUtc => new DateTime(Interlocked.Read(ref lastReceivedTicks), DateTimeKind.Utc);
+
+    // The framing, encryption and sequencing all live above this constructor and see only a byte
+    // stream, so a TCP socket and a relay-carried pipe are interchangeable. `owner` is what closes the
+    // underlying resource (the TcpClient, or the relay socket); when it is null the stream closes itself.
+    // `accepted` marks a connection the host received, which is held to FirstFrameLimit until it has spoken.
+    public Wire(Stream stream, IDisposable owner, byte[] sessionKey = null, bool initiator = false, bool accepted = false)
     {
         this.stream = stream;
         this.owner = owner;
         this.sessionKey = sessionKey;
         this.initiator = initiator;
+        this.accepted = accepted;
         if ((sessionKey != null) & initiator)
         {
             connectionSalt = RandomNumberGenerator.GetBytes(16);
@@ -149,8 +170,12 @@ public sealed class Wire : IDisposable
             throw new IOException(Failure);
         }
         byte[] array = JsonSerializer.SerializeToUtf8Bytes(p);
-        int num = ((sessionKey == null) ? 8388608 : 8388580);
-        if (array.Length > num || !outgoing.Writer.TryWrite(array))
+        int num = ((sessionKey == null) ? MaxFrame : MaxFrame - 28);
+        if (array.Length > num)
+        {
+            throw new FrameTooLargeException();
+        }
+        if (!outgoing.Writer.TryWrite(array))
         {
             throw new IOException("Connection queue or message limit exceeded; edit retained locally");
         }
@@ -187,12 +212,13 @@ public sealed class Wire : IDisposable
             {
                 await stream.ReadExactlyAsync(header, stop.Token);
                 int length = BinaryPrimitives.ReadInt32BigEndian(header);
-                if (length < 1 || length > 8388608)
+                if (length < 1 || length > ((accepted && !receivedAny) ? FirstFrameLimit : MaxFrame))
                 {
                     throw new IOException("Invalid frame size");
                 }
                 byte[] bytes = new byte[length];
                 await stream.ReadExactlyAsync(bytes, stop.Token);
+                Interlocked.Exchange(ref lastReceivedTicks, DateTime.UtcNow.Ticks);
                 bytes = OpenFrame(bytes);
                 if (bytes == null)
                 {
@@ -218,7 +244,8 @@ public sealed class Wire : IDisposable
     {
         await stream.ReadExactlyAsync(header, stop.Token);
         int length = BinaryPrimitives.ReadInt32BigEndian(header);
-        if (length < 1 || length > 8388608)
+        // The preamble is 20 bytes; a larger first frame is read only far enough to tell a plaintext hello from noise.
+        if (length < 1 || length > FirstFrameLimit)
         {
             FailSession("The peer did not speak the collaboration encryption protocol (unexpected preamble).");
             return false;
@@ -385,6 +412,16 @@ public sealed class Wire : IDisposable
     }
 }
 
+/// <summary>A packet too large for any connection. It is the packet's fault, not the connection's: a host relaying it refuses it for its sender
+/// rather than dropping the recipients. It is still an <see cref="IOException"/>, with the message it always had, for callers that keep the edit.</summary>
+public sealed class FrameTooLargeException : IOException
+{
+    public FrameTooLargeException()
+        : base("Connection queue or message limit exceeded; edit retained locally")
+    {
+    }
+}
+
 public sealed class Listener : IDisposable
 {
     private readonly TcpListener listener;
@@ -414,7 +451,7 @@ public sealed class Listener : IDisposable
             while (!stop.IsCancellationRequested)
             {
                 ConcurrentQueue<Wire> accepted = Accepted;
-                accepted.Enqueue(new Wire(await listener.AcceptTcpClientAsync(stop.Token), sessionKey));
+                accepted.Enqueue(new Wire(await listener.AcceptTcpClientAsync(stop.Token), sessionKey, initiator: false, accepted: true));
             }
         }
         catch (Exception ex)
