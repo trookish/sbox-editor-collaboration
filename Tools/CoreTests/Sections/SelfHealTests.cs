@@ -23,6 +23,7 @@ static class SelfHealTests
         ProjectFiles( assert );
         LockedFiles( assert );
         LockedScan( assert );
+        UnsentDelete( assert );
         UndoCommit( assert );
         OwnSave( assert );
     }
@@ -117,6 +118,41 @@ static class SelfHealTests
             File.WriteAllText( Path.Combine( root, "Assets", "keep.txt" ), "second" );
             for ( int i = 0; i < 6; i++ ) client.Poll( sent.Add, Array.Empty<string>() );
             assert( sent.Any( p => p.Kind == "file-put" && p.Path == "Assets/keep.txt" ), "heal_a_released_file_is_uploaded_by_a_later_poll" );
+            client.Dispose();
+        }
+        finally
+        {
+            try { Directory.Delete( root, true ); } catch ( IOException ) { }
+        }
+    }
+
+    // B6: a deletion is forgotten only once it was sent; a send that fails leaves it to be sent by the next poll.
+    private static void UnsentDelete( Action<bool, string> assert )
+    {
+        string root = NewRoot( "delete" );
+        try
+        {
+            Write( root, "Assets/gone/a.txt", "a" );
+            Write( root, "Assets/gone/b.txt", "b" );
+            var sent = new List<Packet>();
+            var client = new FileSyncClient( root ) { PollInterval = TimeSpan.Zero };
+            client.Begin( sent.Add );
+            client.Handle( new Packet { Kind = "files-index", Final = true, FileEntries = new List<FileIndexEntry>() }, sent.Add, Array.Empty<string>() );
+            for ( int i = 0; i < 3; i++ ) client.Poll( sent.Add, Array.Empty<string>() );
+            sent.Clear();
+            Directory.Delete( Path.Combine( root, "Assets", "gone" ), true );
+            bool threw = false;
+            Action<Packet> failing = p => { if ( p.Kind == "file-delete" ) throw new IOException( "closed" ); sent.Add( p ); };
+            try
+            {
+                for ( int i = 0; i < 3; i++ ) client.Poll( failing, Array.Empty<string>() );
+            }
+            catch ( IOException ) { threw = true; }
+            assert( threw, "heal_delete_setup_the_send_failed" );
+            for ( int i = 0; i < 4; i++ ) client.Poll( sent.Add, Array.Empty<string>() );
+            var deleted = sent.Where( p => p.Kind == "file-delete" ).Select( p => p.Path ).OrderBy( x => x, StringComparer.Ordinal ).ToList();
+            assert( deleted.SequenceEqual( new[] { "Assets/gone/a.txt", "Assets/gone/b.txt" } ),
+                "heal_a_deletion_whose_send_failed_is_sent_by_the_next_poll: " + string.Join( ",", deleted ) );
             client.Dispose();
         }
         finally

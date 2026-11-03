@@ -657,8 +657,9 @@ public sealed class FileSyncClient : IDisposable
             foreach ( var prior in known.Values.ToList() )
             {
                 if ( scanSeen.Contains( prior.Path ) || open.Contains( prior.Path ) || IsBeingFetched( prior.Path ) ) continue;
-                known.Remove( prior.Path );
+                // Forgotten only once sent: a send that throws leaves the deletion for the next complete walk.
                 send( new Packet { Kind = "file-delete", Path = prior.Path, BaseSha256 = prior.Sha256 == "" ? null : prior.Sha256 } );
+                known.Remove( prior.Path );
                 Changes?.Record( prior.Path, SessionChangeKind.Deleted, "you" );
             }
         }
