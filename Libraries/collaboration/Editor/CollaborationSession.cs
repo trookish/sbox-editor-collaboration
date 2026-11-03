@@ -61,6 +61,8 @@ public sealed partial class CollaborationSession : EditorEvent.ISceneView, Edito
 
         public DateTime DiskStamp;
 
+        public string DiskSha256;
+
         public DateTime StampMismatchSince;
         public ApplyRecovery Recovery = new ApplyRecovery();
         // Objects this editor could not show or capture: their host JSON stays in Known and is never sent back (ApplyRecovery).
@@ -941,22 +943,42 @@ public sealed partial class CollaborationSession : EditorEvent.ISceneView, Edito
         if (text != null && Connected) Changes.Record("Assets/" + text, SessionChangeKind.Changed, "you");
         Tracked tracked = null;
         DateTime dateTime = default;
+        string digest = null;
         if (text != null && scenes.TryGetValue(text, out var value) && value.Session == sceneEditorSession)
         {
             tracked = value;
             dateTime = SceneAdapter.DiskStamp(text);
+            digest = SceneAdapter.DiskDigest(text);
         }
         bool flag = Connected && Error == null;
-        switch (SceneSaveRules.Decide(saving || (tracked != null && tracked.DiskStamp == dateTime), flag, tracked != null, flag && tracked != null && CanSave()))
+        bool ownSave = saving || (tracked != null && SceneSaveRules.IsOwnSave(false, tracked.DiskStamp, dateTime, tracked.DiskSha256, digest));
+        SceneSaveOutcome outcome = SceneSaveRules.Decide(ownSave, flag, tracked != null, flag && tracked != null && CanSave());
+        string diskCopy = null;
+        if (SceneSaveRules.KeepsDiskCopy(outcome))
+        {
+            try
+            {
+                diskCopy = CopyDiskVersion(text);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                diskCopy = null;
+            }
+        }
+        switch (outcome)
         {
         case SceneSaveOutcome.Absorb:
             tracked.DiskStamp = dateTime;
+            tracked.DiskSha256 = digest;
             server?.AllowSavedBaseline(SceneAdapter.Baseline());
             SetSaveNotice("The scene was saved outside the session; the session accepted the save.");
             break;
         case SceneSaveOutcome.Warn:
             tracked.DiskStamp = dateTime;
-            SetSaveNotice("The scene was saved outside the session while edits were in flight; disk and session state may differ.");
+            tracked.DiskSha256 = digest;
+            SetSaveNotice(diskCopy != null
+                ? "The scene was saved outside the session while edits were in flight; the saved file was copied to " + diskCopy + "."
+                : "The scene was saved outside the session while edits were in flight; disk and session state may differ.");
             break;
         }
     }
@@ -1955,6 +1977,7 @@ public sealed partial class CollaborationSession : EditorEvent.ISceneView, Edito
                 value.SettingsApplied = null;
                 value.SettingsEcho = null;
                 value.DiskStamp = SceneAdapter.DiskStamp(SceneAdapter.PathOf(value.Session));
+                value.DiskSha256 = SceneAdapter.DiskDigest(SceneAdapter.PathOf(value.Session));
             }
         }
         steamTokenValue = freshToken;
@@ -2608,7 +2631,8 @@ public sealed partial class CollaborationSession : EditorEvent.ISceneView, Edito
                         Session = sceneEditorSession3,
                         Known = SceneAdapter.Capture(sceneEditorSession3.Scene),
                         Settings = SceneSettingsAdapter.Capture(sceneEditorSession3.Scene),
-                        DiskStamp = SceneAdapter.DiskStamp(text)
+                        DiskStamp = SceneAdapter.DiskStamp(text),
+                        DiskSha256 = SceneAdapter.DiskDigest(text)
                     };
                     scenes[text] = value;
                     // The settings seed the host's copy when this editor is the scene's first subscriber; otherwise the snapshot replaces them.
@@ -4065,6 +4089,7 @@ public sealed partial class CollaborationSession : EditorEvent.ISceneView, Edito
             SendPresence();
             value.Session.Save(saveAs: false);
             value.DiskStamp = SceneAdapter.DiskStamp(text);
+            value.DiskSha256 = SceneAdapter.DiskDigest(text);
             server?.AllowSavedBaseline(SceneAdapter.Baseline());
         }
         finally
@@ -4309,9 +4334,15 @@ public sealed partial class CollaborationSession : EditorEvent.ISceneView, Edito
             }
         }
         SceneAdapter.Apply(value.Session, dictionary);
-        value.Undo.Pop();
+        // The entry is spent only once its edit left: a send that fails keeps it, so the undo can be taken again after reconnecting.
         value.UndoPending = true;
-        SendEdit(text, value, list, final: true);
+        EditCommit.AfterSend(() => SendEdit(text, value, list, final: true), () => value.Undo.Pop(), () => RollBackUnsent(value));
+    }
+
+    private static void RollBackUnsent(Tracked tracked)
+    {
+        tracked.UndoPending = false;
+        tracked.Pending = null;
     }
 
     // The coalesced half of "apply, capture, Initialize, MirrorNativeUndo". Runs the first request of a burst at once and holds the rest;
@@ -4485,9 +4516,8 @@ public sealed partial class CollaborationSession : EditorEvent.ISceneView, Edito
                 }
             }
             SceneAdapter.Apply(value.Session, dictionary);
-            value.Undo.Push(changes);
             value.UndoPending = true;
-            SendEdit(text, value, changes, final: true);
+            EditCommit.AfterSend(() => SendEdit(text, value, changes, final: true), () => value.Undo.Push(changes), () => RollBackUnsent(value));
             UndoNotice = null;
             undoNoticeExpires = default;
             return true;

@@ -279,6 +279,8 @@ static class CodeTransferTests
         assert( !member.Sent.Any( p => p.Kind is "file-get" or "code-consent" && p.Path != null && !p.Path.StartsWith( "Assets/" ) ) && !member.Sent.Any( p => p.Kind == "code-consent" ), "code_no_code_requested_before_consent" );
         assert( !File.Exists( Path.Combine( guest, "Code", "A.cs" ) ) && !File.Exists( Path.Combine( guest, "Editor", "E.cs" ) ), "code_nothing_written_before_consent" );
 
+        var changes = new SessionChangeLog();
+        member.Client.Changes = changes;
         assert( member.Client.ConsentToCode( member.Send ), "code_onboard_consent_accepted" );
         assert( member.Sent.Count( p => p.Kind == "code-consent" ) == 1 && member.Sent.Last( p => p.Kind == "code-consent" ).Hashes.OrderBy( x => x ).SequenceEqual( offer.Hashes.OrderBy( x => x ) ), "code_consent_packet_lists_exactly_the_offered_hashes" );
         rig.PumpUntil( () => member.Client.CodeState == CodeTransferState.Received );
@@ -295,6 +297,10 @@ static class CodeTransferTests
         assert( member.Client.Offer == null, "code_onboard_offer_is_gone_after_receiving" );
         assert( !Directory.EnumerateFiles( Path.Combine( guest, ".collaboration", "incoming" ) ).Any(), "code_onboard_leaves_no_part_files" );
         assert( !member.Sent.Any( p => p.Kind == "file-put" ), "code_onboard_nothing_pushed_back_to_the_host" );
+        var codeRows = changes.Rows().Where( x => x.Kind == SessionChangeKind.CodeReceived ).Select( x => x.Path ).OrderBy( x => x, StringComparer.Ordinal ).ToList();
+        assert( codeRows.SequenceEqual( new[] { "Code/A.cs", "Code/ui/B.razor", "Editor/E.cs", "ProjectSettings/physics.config" } )
+            && changes.Rows().Where( x => x.Kind == SessionChangeKind.CodeReceived ).All( x => x.By == "the host" && x.Sha256 != null ),
+            "code_onboard_every_received_code_file_is_listed_in_files_changed_this_session: " + string.Join( ",", codeRows ) );
     }
 
     private static void ChangedAfterConsent( Action<bool, string> assert, string root )

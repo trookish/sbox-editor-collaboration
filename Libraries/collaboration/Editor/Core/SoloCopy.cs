@@ -118,7 +118,7 @@ public static class SoloCopy
         {
             return Fail("This is already a solo test copy. Run the test from here instead of copying it again.");
         }
-        string projectFile = Directory.EnumerateFiles(sourceRoot, "*.sbproj", SearchOption.TopDirectoryOnly).FirstOrDefault();
+        string projectFile = ProjectFile.Find(sourceRoot);
         if (projectFile == null)
         {
             return Fail("No .sbproj file was found in the project folder.");

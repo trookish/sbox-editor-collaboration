@@ -109,7 +109,7 @@ public static class SoloTestLauncher
         {
             return "The editor's program file could not be found, so the copy could not be opened. Open " + copyRoot + " from the s&box launcher instead; the test starts by itself.";
         }
-        string project = Directory.EnumerateFiles(copyRoot, "*.sbproj", SearchOption.TopDirectoryOnly).FirstOrDefault();
+        string project = ProjectFile.Find(copyRoot);
         if (project == null)
         {
             return "The copy has no project file.";

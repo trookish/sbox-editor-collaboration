@@ -27,6 +27,19 @@ public static class SceneAdapter
         return File.GetLastWriteTimeUtc(Path.Combine(Root, "Assets", path));
     }
 
+    /// <summary>The SHA-256 of the scene's file, or null when it cannot be read now. Tells a save of the session's own from another program's write in the same second.</summary>
+    public static string DiskDigest(string path)
+    {
+        try
+        {
+            return Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(Path.Combine(Root, "Assets", path))));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
     public static IEnumerable<GameObject> Walk(GameObject parent)
     {
         GameObject[] array = parent.Children.ToArray();
@@ -586,7 +599,7 @@ public static class SceneAdapter
                 }
             }
         }
-        JsonNode jsonNode = JsonNode.Parse(File.ReadAllText(Directory.GetFiles(Root, "*.sbproj").Single()));
+        JsonNode jsonNode = JsonNode.Parse(File.ReadAllText(ProjectFile.Require(Root)));
         list.Add(jsonNode.ToJsonString());
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join("\n", list))));
     }

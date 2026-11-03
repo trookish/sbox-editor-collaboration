@@ -161,7 +161,7 @@ public sealed partial class SessionServer
     {
         try
         {
-            string file = Directory.EnumerateFiles( FileProjectRoot, "*.sbproj", SearchOption.TopDirectoryOnly ).OrderBy( x => x, StringComparer.Ordinal ).FirstOrDefault();
+            string file = ProjectFile.Find( FileProjectRoot );
             return file == null ? null : PackageReferenceDiff.Idents( File.ReadAllText( file ) );
         }
         catch ( Exception ex ) when ( ex is IOException or UnauthorizedAccessException )

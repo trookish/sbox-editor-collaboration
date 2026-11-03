@@ -383,7 +383,7 @@ public sealed class FileSyncClient : IDisposable
     {
         try
         {
-            string file = Directory.EnumerateFiles( root, "*.sbproj", SearchOption.TopDirectoryOnly ).OrderBy( x => x, StringComparer.Ordinal ).FirstOrDefault();
+            string file = ProjectFile.Find( root );
             return file == null ? null : File.ReadAllText( file );
         }
         catch ( Exception ex ) when ( ex is IOException or UnauthorizedAccessException )
@@ -498,6 +498,11 @@ public sealed class FileSyncClient : IDisposable
     // One consented file is finished (written or refused). When the last one is, the person is told once and the offer is re-evaluated on the next listing.
     private void CodeFileFinished( FileIndexEntry entry, bool ok, string recovery )
     {
+        if ( ok )
+        {
+            // Code changes what the project does, so every file written is listed with the rest of this session's changes.
+            Changes?.Record( entry.Path, SessionChangeKind.CodeReceived, "the host", entry.Sha256 );
+        }
         if ( ok ) codeDone++;
         else
         {
@@ -595,6 +600,8 @@ public sealed class FileSyncClient : IDisposable
 
     // Polls the asset tree a bounded slice per frame: the path list once per cycle, then at most FilesPerFrame files and HashBytesPerFrame
     // bytes of hashing per call. Deletions are concluded only after a complete walk, and never from a walk that could not list a folder.
+    private readonly HashSet<string> lockedNoticed = new( StringComparer.OrdinalIgnoreCase );
+
     private void Scan( Action<Packet> send, IEnumerable<string> openScenes )
     {
         if ( scanPaths == null )
@@ -623,7 +630,16 @@ public sealed class FileSyncClient : IDisposable
             scanSeen.Add( path );
             if ( open.Contains( path ) || IsBeingFetched( path ) ) continue;
             var entry = index.Entry( path );
-            if ( entry == null ) continue;
+            if ( entry == null )
+            {
+                // Told once while it stays locked; it is uploaded by the first poll that can read it.
+                if ( index.IsLocked( path ) && lockedNoticed.Add( path ) )
+                {
+                    Notify( "\"" + path + "\" is open in another program, so it is not synchronized yet. It is sent once that program releases it." );
+                }
+                continue;
+            }
+            lockedNoticed.Remove( path );
             known.TryGetValue( path, out var prior );
             if ( prior != null && prior.Sha256 == entry.Sha256 ) continue;
             known[path] = entry;

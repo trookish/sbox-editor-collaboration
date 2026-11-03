@@ -64,6 +64,8 @@ public sealed class FileSyncIndex
 
     private readonly Dictionary<string, (long Size, long Stamp, string Hash)> cache = new( StringComparer.OrdinalIgnoreCase );
 
+    private readonly HashSet<string> locked = new( StringComparer.OrdinalIgnoreCase );
+
     public FileSyncIndex( string root )
     {
         this.root = root;
@@ -105,7 +107,11 @@ public sealed class FileSyncIndex
     public FileIndexEntry Entry( string path )
     {
         var info = new FileInfo( Path.Combine( root, path.Replace( '/', Path.DirectorySeparatorChar ) ) );
-        if ( !info.Exists ) return null;
+        if ( !info.Exists )
+        {
+            locked.Remove( path );
+            return null;
+        }
         if ( info.Length > FileSyncLimits.MaxFileSize ) return new FileIndexEntry( path, "", info.Length );
         long stamp = info.LastWriteTimeUtc.Ticks;
         if ( cache.TryGetValue( path, out var cached ) && cached.Size == info.Length && cached.Stamp == stamp )
@@ -125,12 +131,25 @@ public sealed class FileSyncIndex
         {
             return null;
         }
+        catch ( Exception ex ) when ( ex is IOException or UnauthorizedAccessException )
+        {
+            // Another program holds the file open, or it may not be read now. It is not in this index, but it is not gone either.
+            locked.Add( path );
+            return null;
+        }
+        locked.Remove( path );
         string hash = Hash( path, bytes );
         HashComputations++;
         HashedBytes += bytes.LongLength;
         // The stamp is the one read before the content: a write that lands during the read moves the stamp again and is re-hashed next time.
         cache[path] = (bytes.LongLength, stamp, hash);
         return new FileIndexEntry( path, hash, bytes.LongLength );
+    }
+
+    /// <summary>True when the last read of the file failed because another program held it or it could not be read.</summary>
+    public bool IsLocked( string path )
+    {
+        return path != null && locked.Contains( path );
     }
 
     public void Invalidate( string path )
