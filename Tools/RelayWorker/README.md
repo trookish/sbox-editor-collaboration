@@ -34,13 +34,24 @@ Those are session-hours across **everyone** using the shared relay, and they are
 
 The Worker also caps a room at three guests (four participants with the host), a message at 16 KiB, and a connection at 8 MB/s sustained. Set `RELAY_ACCESS_KEYS` (`wrangler secret put RELAY_ACCESS_KEYS`) if you want only hosts holding a key to be able to create rooms; the library reads the key from `.collaboration/relay-access-key.txt`.
 
+### Shared mode
+
+A relay meant for everyone, so nobody needs a key or an account, runs in shared mode: set `RELAY_MODE` to `shared` (a `vars` entry in `wrangler.jsonc`, or `--var RELAY_MODE:shared`). Hosts then open rooms with no key, and two limits take the key's place:
+
+- New connections per address: 30 a minute by default (`SHARED_CONNECTS_PER_MINUTE`). Past that the Worker answers 429 before a socket is opened. The count is kept per Cloudflare isolate, so it slows down one client hammering the relay rather than counting globally.
+- Idle rooms: a room with no traffic for 30 minutes (`SHARED_ROOM_IDLE_SECONDS`) is closed, and every socket in it is told the code `idle`. A host that is still there reconnects and opens the room again.
+
+A different host still cannot take a room, and the guest proof, the three-guest cap and the bandwidth limit apply as in keyed mode. Without `RELAY_MODE`, nothing changes.
+
 ## Tests
 
 ```bash
 npm run contract            # records a real `wrangler deploy` against a local stand-in and checks the editor's deploy sends the same calls (19 checks)
 npm run dev                # terminal 1: the real Cloudflare runtime, locally, on :8787
-npm test                   # terminal 2: 18 checks with plain WebSocket clients
-dotnet run --project ../RelayTests -- worker ws://localhost:8787/relay      # 24 checks with the library's own client code
+npm test                   # terminal 2: 19 checks with plain WebSocket clients
+dotnet run --project ../RelayTests -- worker ws://localhost:8787/relay      # 23 checks with the library's own client code
+npm run dev:shared         # instead of `npm run dev` (stop that one first; two local instances lock each other's state)
+npm run test:shared -- ws://localhost:8787/relay 40   # 9 checks of shared mode: no key, room idle close, per-address connection cap
 ```
 
 The .NET suite is the same one the .NET relay passes, so the two implementations are held to one contract.

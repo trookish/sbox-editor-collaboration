@@ -1374,7 +1374,7 @@ public sealed partial class CollaborationSession : EditorEvent.ISceneView, Edito
             {
                 try
                 {
-                    discovery.StartHost(port, Convert.ToHexString(hostSecret).ToLowerInvariant(), projectManifestValue);
+                    discovery.StartHost(port, projectManifestValue);
                 }
                 catch (Exception error)
                 {
@@ -1575,7 +1575,7 @@ public sealed partial class CollaborationSession : EditorEvent.ISceneView, Edito
         }
         if (array == null || array.Length != 16)
         {
-            throw new InvalidOperationException("That host did not report a usable session secret.");
+            throw new InvalidOperationException("This host does not share its session secret on the network. Paste the invite code the host sent you to join.");
         }
         byte[] array2 = TeamCreate.InviteCode.DeriveKey(array, text);
         StartCore(new StartPlan

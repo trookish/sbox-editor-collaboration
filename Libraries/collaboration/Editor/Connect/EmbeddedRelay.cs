@@ -43,6 +43,16 @@ public sealed class EmbeddedRelay : IDisposable
     /// </summary>
     public const int MaxPendingSockets = 16;
 
+    /// <summary>
+    /// Rooms open at once. A relay the host runs for itself serves that host's session, so one room is normal; a few more cover a session restarted with
+    /// a new room before the old socket has closed. Past this a host hello is refused with "limit".
+    /// </summary>
+    public const int MaxRooms = 4;
+
+    // Headers cloudflared adds to every request it carries to the origin. A request with any of them came through the public tunnel, not from the host's
+    // own editor, which dials localhost directly.
+    private static readonly string[] TunnelHeaders = { "Cf-Connecting-Ip", "Cf-Ray", "X-Forwarded-For" };
+
     // A refusal or a goodbye is sent, then the close handshake is given this long before the socket is simply aborted.
     private const long CloseGraceMilliseconds = 2000;
 
@@ -93,6 +103,8 @@ public sealed class EmbeddedRelay : IDisposable
         public HttpListenerContext Context;
 
         public string RoomId;
+
+        public bool ViaTunnel;
     }
 
     private sealed class Peer
@@ -100,6 +112,8 @@ public sealed class EmbeddedRelay : IDisposable
         public WebSocket Socket;
 
         public string RoomId;
+
+        public bool ViaTunnel;
 
         public Room Room;
 
@@ -276,7 +290,10 @@ public sealed class EmbeddedRelay : IDisposable
                 Reply( context, 503 );
                 return;
             }
-            upgrades.Add( new Upgrade { Task = context.AcceptWebSocketAsync( null, TimeSpan.FromSeconds( 30 ) ), Context = context, RoomId = room } );
+            bool viaTunnel = false;
+            foreach ( string header in TunnelHeaders )
+                viaTunnel |= !string.IsNullOrEmpty( context.Request.Headers[header] );
+            upgrades.Add( new Upgrade { Task = context.AcceptWebSocketAsync( null, TimeSpan.FromSeconds( 30 ) ), Context = context, RoomId = room, ViaTunnel = viaTunnel } );
         }
         catch ( Exception ex ) when ( ex is HttpListenerException || ex is InvalidOperationException || ex is ObjectDisposedException || ex is WebSocketException || ex is ArgumentException )
         {
@@ -325,7 +342,7 @@ public sealed class EmbeddedRelay : IDisposable
                 continue;
             }
             // The room was validated from the address before the upgrade; no header the client sent is consulted for it.
-            var peer = new Peer { Socket = upgrade.Task.GetAwaiter().GetResult().WebSocket, RoomId = upgrade.RoomId, ConnectedAt = seconds() };
+            var peer = new Peer { Socket = upgrade.Task.GetAwaiter().GetResult().WebSocket, RoomId = upgrade.RoomId, ViaTunnel = upgrade.ViaTunnel, ConnectedAt = seconds() };
             peers.Add( peer );
             Read( peer );
         }
@@ -499,7 +516,18 @@ public sealed class EmbeddedRelay : IDisposable
     private void HostHello( Peer peer, RelayControl hello )
     {
         // No access key is configured on a relay the host runs for itself, so any key the hello carries is accepted, as the worker does with none set.
+        // What stands in for the key is where the hello came from: only the host's own editor opens a room, and it never dials through the tunnel.
+        if ( peer.ViaTunnel )
+        {
+            Refuse( peer, "bad-hello", "A host connects to its own relay from the same computer, not through the public address." );
+            return;
+        }
         rooms.TryGetValue( peer.RoomId, out var old );
+        if ( old == null && rooms.Count >= MaxRooms )
+        {
+            Refuse( peer, "limit", "This relay already has as many rooms open as it allows." );
+            return;
+        }
         if ( old != null )
         {
             if ( !FixedEqual( old.HostProof, hello.HostProof ) )

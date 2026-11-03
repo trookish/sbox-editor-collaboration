@@ -35,6 +35,16 @@ const HELLO_TIMEOUT_MS = 10_000;
 const BYTES_PER_SECOND = 8 * 1024 * 1024;
 const BURST_BYTES = 16 * 1024 * 1024;
 
+// Shared mode (RELAY_MODE = "shared") is for one public relay that every install of the library can use without an account or a key. A host needs no
+// access key there; what keeps one person from crowding out the rest is a cap on new connections per address and a limit on how long a room may sit
+// idle. Both can be tuned with SHARED_CONNECTS_PER_MINUTE and SHARED_ROOM_IDLE_SECONDS. Any other mode is the keyed mode, unchanged.
+const DEFAULT_CONNECTS_PER_MINUTE = 30;
+const DEFAULT_ROOM_IDLE_SECONDS = 30 * 60;
+// Activity is remembered in memory and written to storage at most this often, so a busy room costs no extra storage writes.
+const ACTIVITY_WRITE_MS = 60_000;
+// Addresses remembered by one isolate's connection counter before the oldest are forgotten, so the counter cannot grow without bound.
+const MAX_TRACKED_ADDRESSES = 4096;
+
 const FRAME_DATA = 1;
 const FRAME_OPEN = 2;
 const FRAME_CLOSE = 3;
@@ -42,6 +52,35 @@ const FRAME_CLOSE = 3;
 const HEX32 = /^[0-9a-f]{32}$/;
 const HEX64 = /^[0-9a-f]{64}$/;
 const encoder = new TextEncoder();
+
+function sharedMode(env) {
+	return typeof env.RELAY_MODE === "string" && env.RELAY_MODE.trim().toLowerCase() === "shared";
+}
+
+function positiveSetting(value, fallback) {
+	const n = Number(value);
+	return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+// Connections started per address in the last minute, per isolate. Cloudflare runs many isolates, so this is a brake on one client hammering one
+// location rather than a global count; it needs no storage and no extra binding, which keeps the relay on the free plan.
+const recentConnects = new Map();
+
+function connectAllowed(address, perMinute, now) {
+	const since = now - 60_000;
+	const times = (recentConnects.get(address) || []).filter((t) => t > since);
+	if (times.length >= perMinute) {
+		recentConnects.set(address, times);
+		return false;
+	}
+	times.push(now);
+	recentConnects.delete(address);
+	recentConnects.set(address, times);
+	while (recentConnects.size > MAX_TRACKED_ADDRESSES) {
+		recentConnects.delete(recentConnects.keys().next().value);
+	}
+	return true;
+}
 
 export default {
 	async fetch(request, env) {
@@ -63,6 +102,12 @@ export default {
 		const room = url.searchParams.get("room");
 		if (!room || !HEX32.test(room)) {
 			return new Response("Missing or malformed room.", { status: 400 });
+		}
+		if (sharedMode(env)) {
+			const address = request.headers.get("CF-Connecting-IP") || "unknown";
+			if (!connectAllowed(address, positiveSetting(env.SHARED_CONNECTS_PER_MINUTE, DEFAULT_CONNECTS_PER_MINUTE), Date.now())) {
+				return new Response("Too many connections from this address; wait a minute and try again.", { status: 429, headers: { "retry-after": "60" } });
+			}
 		}
 		const stub = env.ROOMS.get(env.ROOMS.idFromName(room));
 		return stub.fetch(request);
@@ -114,6 +159,8 @@ export class Room extends DurableObject {
 		super(ctx, env);
 		// Byte budgets live in memory only: they matter while sockets are busy, and a socket that is busy keeps the object awake.
 		this.budgets = new WeakMap();
+		this.lastActive = 0;
+		this.activityWritten = 0;
 	}
 
 	async fetch(request) {
@@ -134,6 +181,9 @@ export class Room extends DurableObject {
 	// idle hibernating socket is free and counts toward no limit), so the wait is documented rather than fought.
 	async alarm() {
 		const now = Date.now();
+		if (await this.expireIfIdle(now)) {
+			return;
+		}
 		let waiting = 0;
 		for (const ws of this.ctx.getWebSockets()) {
 			const att = ws.deserializeAttachment();
@@ -147,11 +197,55 @@ export class Room extends DurableObject {
 		}
 		if (waiting > 0) {
 			await this.ctx.storage.setAlarm(Date.now() + 2000);
+		} else if (sharedMode(this.env) && (await this.ctx.storage.get("room"))) {
+			await this.ctx.storage.setAlarm((await this.lastActivity()) + this.idleMs());
 		}
+	}
+
+	// ---- shared mode: rooms that sit idle are closed -------------------------------------------------------------------
+
+	idleMs() {
+		return positiveSetting(this.env.SHARED_ROOM_IDLE_SECONDS, DEFAULT_ROOM_IDLE_SECONDS) * 1000;
+	}
+
+	async lastActivity() {
+		const stored = (await this.ctx.storage.get("active")) || 0;
+		return Math.max(this.lastActive, stored);
+	}
+
+	async touch() {
+		if (!sharedMode(this.env)) {
+			return;
+		}
+		const now = Date.now();
+		this.lastActive = now;
+		if (now - this.activityWritten >= ACTIVITY_WRITE_MS) {
+			this.activityWritten = now;
+			await this.ctx.storage.put("active", now);
+		}
+	}
+
+	// A room nobody has sent anything through for the idle limit is ended as if its host had left: every socket is told why and the room is forgotten.
+	// A host that is still there reconnects and registers the room again, so this frees abandoned rooms without stranding a live session.
+	async expireIfIdle(now) {
+		if (!sharedMode(this.env) || !(await this.ctx.storage.get("room"))) {
+			return false;
+		}
+		if (now - (await this.lastActivity()) < this.idleMs()) {
+			return false;
+		}
+		await this.ctx.storage.deleteAll();
+		this.lastActive = 0;
+		this.activityWritten = 0;
+		for (const ws of this.ctx.getWebSockets()) {
+			this.refuse(ws, "idle", "The room was closed after a long time with no activity.");
+		}
+		return true;
 	}
 
 	async webSocketMessage(ws, message) {
 		const att = ws.deserializeAttachment() || {};
+		await this.touch();
 		if (att.role === "pending") {
 			return this.onHello(ws, att, message);
 		}
@@ -221,7 +315,7 @@ export class Room extends DurableObject {
 		if (hello.key != null && (typeof hello.key !== "string" || hello.key.length > MAX_KEY_CHARS)) {
 			return this.refuse(ws, "bad-hello", "The relay access key is too long.");
 		}
-		if (!(await this.keyAccepted(hello.key))) {
+		if (!sharedMode(this.env) && !(await this.keyAccepted(hello.key))) {
 			return this.refuse(ws, "bad-key", "The access key was not accepted.");
 		}
 		const stored = await this.ctx.storage.get("room");
@@ -244,6 +338,15 @@ export class Room extends DurableObject {
 		const hostToken = crypto.randomUUID();
 		await this.ctx.storage.put("room", { host: hello.host, guest: hello.guest, hostToken, next: stored ? stored.next : 0 });
 		ws.serializeAttachment({ role: "host", room: att.room, hostToken });
+		if (sharedMode(this.env)) {
+			this.activityWritten = Date.now();
+			await this.ctx.storage.put("active", this.activityWritten);
+			const due = this.activityWritten + this.idleMs();
+			const alarm = await this.ctx.storage.getAlarm();
+			if (alarm == null || alarm > due) {
+				await this.ctx.storage.setAlarm(due);
+			}
+		}
 		ws.send(ok());
 	}
 

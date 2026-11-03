@@ -2,7 +2,7 @@ namespace TeamCreate;
 
 public static class LibraryInfo
 {
-    public const string LibraryVersion = "1.2.0";
+    public const string LibraryVersion = "1.3.0";
 
     /// <summary>The ident this workspace's descriptor carried before it was renamed to the published one. Kept so that a copy made from the older descriptor is still recognised.</summary>
     public const string LibraryIdent = "editor_collaboration";

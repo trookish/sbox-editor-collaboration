@@ -44,6 +44,33 @@ public static class DiscoveryProtocol
         return "TC1?pid=" + projectIdHash8 + "\n";
     }
 
+    /// <summary>
+    /// The reply a host sends: project, port, name and revision, without the session secret. A 1.2.0 joiner requires the secret field and so skips this
+    /// reply; it still joins with the full invite code, whose own routes do not depend on discovery.
+    /// </summary>
+    public static string BuildReply(string projectIdHash8, int sessionPort, string hostName, string manifest8)
+    {
+        Validate(projectIdHash8, sessionPort, manifest8);
+        return "TC1!pid=" + projectIdHash8 + ";port=" + sessionPort.ToString(CultureInfo.InvariantCulture) + ";name=" + SanitizeHostName(hostName) + ";rev=" + manifest8 + "\n";
+    }
+
+    private static void Validate(string projectIdHash8, int sessionPort, string manifest8)
+    {
+        if (!IsHex(projectIdHash8, 8))
+        {
+            throw new ArgumentException("A discovery reply requires an 8-character lowercase hexadecimal project id hash.", "projectIdHash8");
+        }
+        if (sessionPort < 1 || sessionPort > 65535)
+        {
+            throw new ArgumentOutOfRangeException("sessionPort", "A discovery reply requires a TCP session port between 1 and 65535.");
+        }
+        if (!IsHex(manifest8, 8))
+        {
+            throw new ArgumentException("A discovery reply requires an 8-character lowercase hexadecimal manifest revision.", "manifest8");
+        }
+    }
+
+    /// <summary>The 1.2.0 reply, which carried the session secret. Kept so the parser's handling of hosts that still send it stays tested; no host sends it now.</summary>
     public static string BuildReply(string projectIdHash8, int sessionPort, string hostName, string secretHex, string manifest8)
     {
         if (!IsHex(projectIdHash8, 8))
@@ -124,7 +151,8 @@ public static class DiscoveryProtocol
         {
             return false;
         }
-        if (!dictionary.TryGetValue("secret", out var value4) || !IsHex(value4, 32))
+        // Optional since 1.3.0: hosts no longer send it. When a 1.2.0 host does, it must still be well formed.
+        if (dictionary.TryGetValue("secret", out var value4) && !IsHex(value4, 32))
         {
             return false;
         }

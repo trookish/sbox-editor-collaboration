@@ -6,7 +6,7 @@ The checklist for releasing the library so that other people can install it. Eve
 
 ### 1. Deploy the shared relay
 
-The library connects two editors over the internet through a relay. The address every installation uses by default is compiled into `Libraries/collaboration/Editor/Core/RelayDefaults.cs` (`DefaultUrl`), and it is **empty until a relay is deployed**, which means a fresh install can only host sessions on one network.
+The library connects two editors over the internet through a relay. The address every installation uses by default is compiled into `Libraries/collaboration/Editor/Core/RelayDefaults.cs` (`BuiltInUrls`, an ordered list; the first usable entry is `DefaultUrl`), and it is **empty until a relay is deployed**, which means a fresh install can only host sessions on one network. `npm run deploy` deploys that relay in shared mode (no access key for hosts; a per-address connection cap and an idle-room close instead, see `Tools/RelayWorker/README.md`) and puts its address first in the list.
 
 Either deploy from the editor or from a terminal; both put the same Worker on the same free plan.
 

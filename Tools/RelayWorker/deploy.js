@@ -46,7 +46,9 @@ if (who.status !== 0 || /not authenticated|not logged in/i.test((who.stdout || "
 }
 
 say("\nDeploying the relay...");
-const deploy = run(["deploy"]);
+// This is the relay every install of the library uses by default, so it runs in shared mode: no access key for hosts, a per-address connection cap and
+// idle rooms closed instead (see README.md, Shared mode). A relay a person sets up for themselves from the editor is not deployed by this script.
+const deploy = run(["deploy", "--var", "RELAY_MODE:shared"]);
 const output = (deploy.stdout || "") + (deploy.stderr || "");
 if (deploy.status !== 0) {
 	console.error(output);
@@ -60,7 +62,7 @@ if (deploy.status !== 0) {
 const match = output.match(/https:\/\/([a-z0-9-]+(?:\.[a-z0-9-]+)*\.workers\.dev)/i);
 if (!match) {
 	console.error(output);
-	fail("The deploy succeeded but no workers.dev address was printed, so the library was not updated. Copy the address above into RelayDefaults.DefaultUrl by hand as wss://<address>/relay.");
+	fail("The deploy succeeded but no workers.dev address was printed, so the library was not updated. Add the address above to RelayDefaults.BuiltInUrls by hand as wss://<address>/relay.");
 }
 const relayUrl = "wss://" + match[1] + "/relay";
 
@@ -84,11 +86,16 @@ if (!healthy) {
 }
 
 const source = readFileSync(defaultsFile, "utf8");
-const pattern = /public static readonly string DefaultUrl = (?:null|"[^"]*");/;
-if (!pattern.test(source)) {
-	fail("RelayDefaults.cs no longer has the DefaultUrl line this script edits; set it to " + relayUrl + " by hand.");
+// The new relay goes first in RelayDefaults.BuiltInUrls; any earlier deployment stays in the list after it, so a library already in people's hands
+// that still names the old address keeps working, and the same address is never listed twice.
+const pattern = /public static readonly string\[\] BuiltInUrls = \{([^}]*)\};/;
+const found = source.match(pattern);
+if (!found) {
+	fail("RelayDefaults.cs no longer has the BuiltInUrls line this script edits; add " + relayUrl + " to it by hand.");
 }
-writeFileSync(defaultsFile, source.replace(pattern, `public static readonly string DefaultUrl = "${relayUrl}";`));
+const existing = [...found[1].matchAll(/"([^"]*)"/g)].map((m) => m[1]).filter((u) => u !== relayUrl);
+const list = [relayUrl, ...existing].map((u) => JSON.stringify(u)).join(", ");
+writeFileSync(defaultsFile, source.replace(pattern, `public static readonly string[] BuiltInUrls = { ${list} };`));
 
 say("\nDone. Your relay is live at " + relayUrl);
 say("The library now uses it by default. Rebuild/commit the library so your friends get it:");

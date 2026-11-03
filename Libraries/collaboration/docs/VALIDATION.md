@@ -308,7 +308,7 @@ Negative control run and observed: reverting the manifest's use of `MetaFileRule
 ### Not executed, and not to be inferred
 
 - **The Worker has never run on Cloudflare's network.** No account was used. Its behaviour there (cold starts, the free-tier request and duration limits, real hibernation eviction, real TLS) is unobserved. The message-cost figures come from a local run.
-- **`npm run deploy` has not been run.** Its parsing of Wrangler's output was checked against sample text, not a real deploy. Until it is run, `RelayDefaults.DefaultUrl` is empty and the dock says *"No relay is set up…"*.
+- **`npm run deploy` has not been run.** Its parsing of Wrangler's output was checked against sample text, not a real deploy. Until it is run, `RelayDefaults.BuiltInUrls` is empty, so `RelayDefaults.DefaultUrl` is null, and the dock says *"No relay is set up…"*.
 - **No friend has joined a session from another country.** The library cannot yet claim that Saudi Arabia to Germany works; the design and every local check say it should.
 - **First-run creation of `ProjectSettings/collaboration.json`** is unit-tested (creation, an existing file left alone, a broken file reported, a relaxed gate preserved) but was not exercised by clicking Host in an editor with no settings file.
 

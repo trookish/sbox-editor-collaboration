@@ -4462,9 +4462,8 @@ Assert( !DiscoveryProtocol.TryParseReply( null, out var absentReply ) && absentR
 Assert( !DiscoveryProtocol.TryParseReply( goodDiscovery.Replace( "pid=deadbeef;", "" ), out _ ) &&
     !DiscoveryProtocol.TryParseReply( goodDiscovery.Replace( ";port=32123", "" ), out _ ) &&
     !DiscoveryProtocol.TryParseReply( goodDiscovery.Replace( ";name=box", "" ), out _ ) &&
-    !DiscoveryProtocol.TryParseReply( goodDiscovery.Replace( ";" + "secret=" + discoverySecret, "" ), out _ ) &&
     !DiscoveryProtocol.TryParseReply( goodDiscovery.Replace( ";rev=0a1b2c3d", "" ), out _ ),
-    "a reply missing any one of its required keys is refused" );
+    "a reply missing any one of its required keys is refused (the secret has been optional since 1.3.0; ConnectivityDefaultsTests covers it)" );
 Assert( !DiscoveryProtocol.TryParseReply( goodDiscovery.Replace( "port=32123", "port=abc" ), out _ ) &&
     !DiscoveryProtocol.TryParseReply( goodDiscovery.Replace( "port=32123", "port=" ), out _ ) &&
     !DiscoveryProtocol.TryParseReply( goodDiscovery.Replace( "port=32123", "port= 5" ), out _ ) &&

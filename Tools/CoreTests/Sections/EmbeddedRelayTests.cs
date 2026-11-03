@@ -139,9 +139,12 @@ public static class EmbeddedRelayTests
         return socket;
     }
 
-    private static ClientWebSocket Connect( EmbeddedRelay relay, string room )
+    private static ClientWebSocket Connect( EmbeddedRelay relay, string room, string tunnelClient = null )
     {
         var socket = NewClient();
+        // cloudflared adds Cf-Connecting-Ip (and X-Forwarded-For) to every request it carries, so a request with it arrived through the tunnel.
+        if ( tunnelClient != null )
+            socket.Options.SetRequestHeader( "Cf-Connecting-Ip", tunnelClient );
         var connecting = socket.ConnectAsync( new Uri( "ws://localhost:" + relay.Port + "/relay?room=" + room ), CancellationToken.None );
         if ( !Drive( relay, connecting ) || connecting.Status != TaskStatus.RanToCompletion )
             throw new InvalidOperationException( "The embedded relay did not accept a WebSocket for room " + room + "." );
@@ -207,6 +210,7 @@ public static class EmbeddedRelayTests
         SlowReader( assert );
         HostDeparture( assert );
         RoomsIsolated( assert );
+        TunnelAndRoomCap( assert );
         DisposeAndPort( assert );
         LibraryClients( assert );
     }
@@ -638,6 +642,47 @@ public static class EmbeddedRelayTests
                 assert( atB != null && atB.Data.SequenceEqual( new byte[] { 0xB2 } ) && !atA.IsCompleted, "embrelay_rooms_channel_numbers_do_not_cross" );
             }
         }
+    }
+
+    // ---- Audit 1 B#6/B#7: only the host's own editor opens rooms, and there are few of them ------------------------------------
+
+    private static void TunnelAndRoomCap( Action<bool, string> assert )
+    {
+        var ( relay, _ ) = Start();
+        using ( relay )
+        {
+            byte[] owner = Secret( 40 ), stranger = Secret( 41 );
+            using var host = Host( relay, owner, assert, "embrelay_tunnel_local_host_ok" );
+            // A stranger who learns the tunnel address tries to open a room of their own through it.
+            var viaTunnel = Connect( relay, Room( stranger ), "203.0.113.9" );
+            SendText( relay, viaTunnel, RelayProtocol.BuildHostHello( stranger, null ) );
+            var refusedReply = Next( relay, viaTunnel );
+            assert( ErrorCode( refusedReply ) == "bad-hello" && relay.Stats.Rooms == 1, "embrelay_tunnel_host_hello_refused" );
+            assert( ClosedSoon( relay, viaTunnel, out _ ), "embrelay_tunnel_host_socket_closed" );
+            viaTunnel.Dispose();
+            // A guest through the tunnel is exactly what the tunnel is for.
+            var guestSocket = Connect( relay, Room( owner ), "203.0.113.10" );
+            SendText( relay, guestSocket, RelayProtocol.BuildGuestHello( owner ) );
+            assert( IsOk( Next( relay, guestSocket ) ), "embrelay_tunnel_guest_still_admitted" );
+            guestSocket.Dispose();
+        }
+        var ( capped, _ ) = Start();
+        using ( capped )
+        {
+            var hosts = new List<ClientWebSocket>();
+            for ( int i = 0; i < EmbeddedRelay.MaxRooms; i++ )
+                hosts.Add( Host( capped, Secret( (byte)( 50 + i ) ), assert, "embrelay_roomcap_host_" + i + "_ok" ) );
+            var ( extra, reply ) = Hello( capped, Room( Secret( 60 ) ), RelayProtocol.BuildHostHello( Secret( 60 ), null ) );
+            assert( ErrorCode( reply ) == "limit" && capped.Stats.Rooms == EmbeddedRelay.MaxRooms, "embrelay_roomcap_extra_room_refused_with_limit" );
+            // The same host coming back after a blip replaces its own room, so the cap never locks out a reconnect.
+            var ( again, againReply ) = Hello( capped, Room( Secret( 50 ) ), RelayProtocol.BuildHostHello( Secret( 50 ), null ) );
+            assert( IsOk( againReply ) && capped.Stats.Rooms == EmbeddedRelay.MaxRooms, "embrelay_roomcap_returning_host_replaces_its_room" );
+            extra.Dispose();
+            again.Dispose();
+            foreach ( var h in hosts )
+                h.Dispose();
+        }
+        assert( EmbeddedRelay.MaxRooms >= 2 && EmbeddedRelay.MaxRooms <= 8, "embrelay_roomcap_is_small_but_allows_a_restart_overlap" );
     }
 
     private static void DisposeAndPort( Action<bool, string> assert )

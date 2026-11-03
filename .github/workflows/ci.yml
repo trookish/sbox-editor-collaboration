@@ -59,5 +59,27 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "The Worker's wire-contract test failed." }
           }
           finally {
-            Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
+            # The whole tree: npx leaves workerd running otherwise, and a leftover workerd locks the next instance's state.
+            taskkill /F /T /PID $server.Id | Out-Null
+          }
+
+      - name: Worker shared-mode test
+        working-directory: Tools/RelayWorker
+        shell: pwsh
+        # A second wrangler dev with the shared settings. It runs after the first has stopped: two local instances lock each other's state.
+        run: |
+          $port = 18787
+          $server = Start-Process -FilePath npx.cmd -ArgumentList @('wrangler','dev','--local','--ip','127.0.0.1','--port',"$port",'--inspector-port','19229','--var','RELAY_MODE:shared','--var','SHARED_ROOM_IDLE_SECONDS:3','--var','SHARED_CONNECTS_PER_MINUTE:40') -PassThru -NoNewWindow
+          try {
+            $ready = $false
+            for ($i = 0; $i -lt 60 -and -not $ready; $i++) {
+              try { $ready = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 "http://127.0.0.1:$port/health").StatusCode -eq 200 } catch { Start-Sleep -Seconds 2 }
+            }
+            if (-not $ready) { throw "wrangler dev did not answer on port $port." }
+            node test/shared.test.mjs "ws://127.0.0.1:$port/relay" 40
+            if ($LASTEXITCODE -ne 0) { throw "The Worker's shared-mode test failed." }
+          }
+          finally {
+            # The whole tree: npx leaves workerd running otherwise, and a leftover workerd locks the next instance's state.
+            taskkill /F /T /PID $server.Id | Out-Null
           }

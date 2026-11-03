@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -12,10 +13,34 @@ namespace TeamCreate;
 public static class RelayDefaults
 {
     /// <summary>
-    /// The relay every project uses unless it says otherwise. Null until the library's own relay has been deployed; Tools/RelayWorker/set-default-relay.js
-    /// writes the address here after `wrangler deploy`.
+    /// The library's own relays, in the order they are preferred. Empty until one has been deployed; Tools/RelayWorker/deploy.js writes the address here
+    /// after `wrangler deploy`. A list rather than one address so a second deployment can be added without a code change anywhere else.
     /// </summary>
-    public static readonly string DefaultUrl = null;
+    public static readonly string[] BuiltInUrls = { };
+
+    /// <summary>The relay every project uses unless it says otherwise: the first usable entry of <see cref="BuiltInUrls"/>, or null when there is none.</summary>
+    public static readonly string DefaultUrl = FirstUsable(BuiltInUrls);
+
+    /// <summary>
+    /// The first entry that is a valid relay address on the public internet, trimmed; null when there is none. Blank, malformed and loopback entries are
+    /// skipped, because a built-in relay on someone's own computer could never be reached by a friend.
+    /// </summary>
+    public static string FirstUsable(IReadOnlyList<string> urls)
+    {
+        if (urls == null)
+        {
+            return null;
+        }
+        foreach (string url in urls)
+        {
+            string trimmed = url?.Trim();
+            if (!string.IsNullOrEmpty(trimmed) && RelayProtocol.TryValidateUrl(trimmed, out _, out _) && RelayProtocol.IsPublicRelay(trimmed))
+            {
+                return trimmed;
+            }
+        }
+        return null;
+    }
 
     /// <summary>The value of RelayUrl that opts a project out of relaying altogether.</summary>
     public const string Off = "off";

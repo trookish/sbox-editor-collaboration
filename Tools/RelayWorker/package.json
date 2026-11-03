@@ -8,6 +8,8 @@
 		"deploy": "node deploy.js",
 		"embed": "node embed.js",
 		"test": "node test/worker.test.mjs",
+		"dev:shared": "wrangler dev --local --port 8787 --var RELAY_MODE:shared --var SHARED_ROOM_IDLE_SECONDS:3 --var SHARED_CONNECTS_PER_MINUTE:40",
+		"test:shared": "node test/shared.test.mjs",
 		"contract": "node test/capture-wrangler.mjs && node test/contract.test.mjs"
 	},
 	"devDependencies": {

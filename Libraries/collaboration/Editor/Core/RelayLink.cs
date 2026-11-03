@@ -160,7 +160,12 @@ public enum RelayHostState
 /// </summary>
 public sealed class RelayHost : IDisposable
 {
-    public const int MaxChannels = 16;
+    /// <summary>
+    /// Channels the host holds open at once. The same bound as the host's own server, <see cref="SessionLimits.MaxConnections"/>, and for the same reason:
+    /// a channel opens before its guest has been admitted, so this is deliberately larger than <see cref="SessionLimits.MaxParticipants"/> to leave room
+    /// for reconnects and for guests who will be refused with a readable message.
+    /// </summary>
+    public const int MaxChannels = SessionLimits.MaxConnections;
 
     public const int MaxReconnectAttempts = 8;
 

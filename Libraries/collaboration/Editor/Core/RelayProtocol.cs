@@ -296,6 +296,8 @@ public static class RelayProtocol
                 return "The session is full on the relay.";
             case "limit":
                 return "The relay is at capacity or is limiting this address. Try again shortly.";
+            case "idle":
+                return "The shared relay closed this session's room after a long time with no activity. Reconnecting opens it again.";
             case "version":
                 return fallback ?? "The relay and this library speak different protocol versions.";
             default:

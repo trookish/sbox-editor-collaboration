@@ -32,7 +32,6 @@ public sealed class LanDiscovery : IDisposable
 
     private int sessionPort;
 
-    private string hostSecretHex;
 
     private string hostManifest8;
 
@@ -109,9 +108,18 @@ public sealed class LanDiscovery : IDisposable
         }
     }
 
-    public void StartHost(int sessionPort, string secretHex, string manifest8)
+    /// <summary>
+    /// What a hosting editor answers to a discovery query. It names the port and the project revision but never the session secret: anyone on the
+    /// network can send a query, and the secret is what the invite code is for.
+    /// </summary>
+    public static string HostReply(string projectIdHash8, int sessionPort, string hostName, string manifest8)
     {
-        DiscoveryProtocol.BuildReply(projectIdHash8, sessionPort, "host", secretHex, manifest8);
+        return DiscoveryProtocol.BuildReply(projectIdHash8, sessionPort, hostName, manifest8);
+    }
+
+    public void StartHost(int sessionPort, string manifest8)
+    {
+        HostReply(projectIdHash8, sessionPort, "host", manifest8);
         if (socket == null || disposed)
         {
             failure = CollaborationDiagnostics.Bounded("LAN discovery is unavailable: the rendezvous socket could not be opened on this machine.");
@@ -123,7 +131,6 @@ public sealed class LanDiscovery : IDisposable
         else
         {
             this.sessionPort = sessionPort;
-            hostSecretHex = secretHex;
             hostManifest8 = manifest8;
             hosts.Clear();
             hosting = true;
@@ -177,7 +184,7 @@ public sealed class LanDiscovery : IDisposable
         else if (DiscoveryProtocol.TryParseReply(text, out reply) && !(reply.ProjectIdHash8 != projectIdHash8) && !hosting)
         {
             string text3 = from.Address.ToString();
-            if (hosts.Count >= 16 && !hosts.ContainsKey(text3))
+            if (hosts.Count >= MaxTrackedHosts && !hosts.ContainsKey(text3))
             {
                 DropOldest();
             }
@@ -187,7 +194,7 @@ public sealed class LanDiscovery : IDisposable
 
     private void Reply(IPEndPoint to)
     {
-        byte[] bytes = Encoding.ASCII.GetBytes(DiscoveryProtocol.BuildReply(projectIdHash8, sessionPort, Environment.MachineName, hostSecretHex, hostManifest8));
+        byte[] bytes = Encoding.ASCII.GetBytes(HostReply(projectIdHash8, sessionPort, Environment.MachineName, hostManifest8));
         socket.Send(bytes, bytes.Length, to);
     }
 
