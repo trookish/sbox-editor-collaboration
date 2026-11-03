@@ -72,7 +72,7 @@ static class FileSyncTests
         var fetched = plan.Fetch.Select( x => x.Path ).OrderBy( x => x, StringComparer.Ordinal ).ToList();
         assert( fetched.SequenceEqual( new[] { "Assets/changed.vmat", "Assets/m1.png", "Assets/m2.vmdl", "Assets/m3.sound", "Assets/scenes/closed.scene" } ),
             "files_plan_fetches_missing_and_changed_assets_and_closed_scenes_only" );
-        assert( plan.CodeNotice == "Your code differs from the host's in 2 file(s), for example Code/a.cs, Code/b.cs. Update it through Git. Scenes and assets are synchronized automatically.",
+        assert( plan.CodeNotice == "Your code differs from the host's in 2 file(s), for example Code/a.cs, Code/b.cs. Review the host's code in the Code card to copy it. Scenes and assets are synchronized automatically.",
             "files_plan_reports_code_differences_in_one_notice" );
         assert( plan.Notices.Contains( FileJoinPlan.TooLarge( "Assets/huge.vmdl" ) ), "files_plan_names_a_file_above_the_limit" );
         assert( FileJoinPlan.Plan( host.Take( 5 ).ToList(), host.Take( 5 ).ToList(), Array.Empty<string>() ).Fetch.Count == 0, "files_plan_identical_projects_fetch_nothing" );

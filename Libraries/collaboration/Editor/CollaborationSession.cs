@@ -1095,30 +1095,40 @@ public sealed partial class CollaborationSession : EditorEvent.ISceneView, Edito
             // The first Host click on a new project writes the shared settings itself: a fresh project id and the library's own gates, all on.
             // Only the host does this; a friend joining a project that has no settings is told to get the host's copy, since a project id they
             // invented would never match.
-            SetupResult setup = CollaborationSetup.EnsureConfig(path, Project.Current?.Config?.Org, LibraryInfo.DefaultLibraryIdent(Project.Current?.Config?.Org), LibraryInfo.LibraryVersion);
+            SetupResult setup = CollaborationSetup.EnsureConfig(path, Project.Current?.Config?.Org, LibraryInfo.DefaultLibraryIdent(Project.Current?.Config?.Org), LibraryInfo.LibraryVersion, Project.Current?.Config?.FullIdent);
             if (setup.Error != null)
             {
                 throw new InvalidOperationException(setup.Error);
             }
+            List<string> setupNotices = new List<string>();
             if (setup.Created)
             {
-                ActionNotice = "Created ProjectSettings/collaboration.json for this project. Your friend needs the same file: send them the project as it is now.";
+                setupNotices.Add("Created ProjectSettings/collaboration.json for this project.");
+            }
+            // The session folder holds the relay key and recovery copies; it is kept out of the project's Git history from the first host.
+            GitIgnoreResult ignored = GitIgnoreRules.EnsureIgnored(SceneAdapter.Root);
+            if (ignored.Changed)
+            {
+                setupNotices.Add(GitIgnoreRules.Notice);
+            }
+            else if (ignored.Error != null)
+            {
+                setupNotices.Add(ignored.Error);
+            }
+            if (setupNotices.Count > 0)
+            {
+                ActionNotice = string.Join(" ", setupNotices);
                 actionNoticeExpires = DateTime.UtcNow.AddSeconds(30.0);
             }
         }
-        if (!File.Exists(path))
+        CollaborationConfig collaborationConfig = LoadConfig(out string configError);
+        if (collaborationConfig.ProjectId == null)
         {
-            throw new InvalidOperationException("This project has no ProjectSettings/collaboration.json. Ask the host for a copy of the project, so both of you have the same file.");
+            throw new InvalidOperationException(configError ?? "This project has no ident in its .sbproj file and no ProjectSettings/collaboration.json. Ask the host for a copy of that file.");
         }
-        JsonNode jsonNode = JsonNode.Parse(File.ReadAllText(path))?["ProjectId"];
-        if (jsonNode == null || !Guid.TryParse(jsonNode.GetValue<string>(), out var _))
-        {
-            throw new InvalidOperationException("ProjectId must be a GUID");
-        }
-        string preparedProject = jsonNode.GetValue<string>();
+        string preparedProject = collaborationConfig.ProjectId;
         string preparedBaseline = SceneAdapter.Baseline();
         string text = SceneAdapter.Baseline(includeScenes: false);
-        CollaborationConfig collaborationConfig = CollaborationConfig.LoadFrom(path, out var _);
         UseConfig(collaborationConfig);
         if (plan.ZeroConfig && plan.Host)
         {
@@ -1246,7 +1256,7 @@ public sealed partial class CollaborationSession : EditorEvent.ISceneView, Edito
     {
         if (string.IsNullOrEmpty(config.ProjectId))
         {
-            throw new InvalidOperationException("ProjectSettings/collaboration.json must carry a shared ProjectId before a session can be hosted.");
+            throw new InvalidOperationException("This project has no ident in its .sbproj file and no ProjectId in ProjectSettings/collaboration.json, so a session cannot be hosted.");
         }
         plan.Secret = TeamCreate.InviteCode.NewSecret();
         plan.SessionKey = TeamCreate.InviteCode.DeriveKey(plan.Secret, config.ProjectId);
@@ -1528,7 +1538,7 @@ public sealed partial class CollaborationSession : EditorEvent.ISceneView, Edito
         string text = CurrentProjectId();
         if (string.IsNullOrEmpty(text))
         {
-            throw new InvalidOperationException("Create ProjectSettings/collaboration.json with a shared ProjectId, then commit it to Git");
+            throw new InvalidOperationException("This project has no ident in its .sbproj file and no ProjectSettings/collaboration.json. Ask the host for a copy of that file.");
         }
         if (!TeamCreate.InviteCode.TryDecode(code, text, out var data, out var error))
         {
@@ -1552,7 +1562,7 @@ public sealed partial class CollaborationSession : EditorEvent.ISceneView, Edito
         string text = CurrentProjectId();
         if (string.IsNullOrEmpty(text))
         {
-            throw new InvalidOperationException("Create ProjectSettings/collaboration.json with a shared ProjectId, then commit it to Git");
+            throw new InvalidOperationException("This project has no ident in its .sbproj file and no ProjectSettings/collaboration.json. Ask the host for a copy of that file.");
         }
         byte[] array;
         try
@@ -2814,8 +2824,15 @@ public sealed partial class CollaborationSession : EditorEvent.ISceneView, Edito
 
     private static CollaborationConfig LoadConfig()
     {
-        string error;
-        return CollaborationConfig.LoadFrom(Path.Combine(SceneAdapter.Root, "ProjectSettings", "collaboration.json"), out error);
+        return LoadConfig(out _);
+    }
+
+    /// <summary>The project's settings, with the project id resolved: the configured one, else the one derived from the project's ident.</summary>
+    private static CollaborationConfig LoadConfig(out string error)
+    {
+        CollaborationConfig config = CollaborationConfig.LoadFrom(Path.Combine(SceneAdapter.Root, "ProjectSettings", "collaboration.json"), out error);
+        config.ProjectId = ProjectIdentity.Resolve(config.ProjectId, Project.Current?.Config?.FullIdent);
+        return config;
     }
 
     private void UseConfig(CollaborationConfig config)
@@ -4285,7 +4302,7 @@ public sealed partial class CollaborationSession : EditorEvent.ISceneView, Edito
         }
     }
 
-    private static void ShowToast(string title, string subtitle, Color border, float seconds)
+    internal static void ShowToast(string title, string subtitle, Color border, float seconds)
     {
         try
         {

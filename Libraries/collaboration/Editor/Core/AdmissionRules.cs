@@ -57,7 +57,7 @@ public static class AdmissionRules
         return null;
     }
 
-    public const string BaselineRefusalMessage = "Project/scene baseline differs (engine, source, assets or metadata). Sync copies in Git before joining.";
+    public const string BaselineRefusalMessage = "This computer's project differs from the host's in a way file synchronization cannot reconcile. Update s&box and the collaboration library to the host's versions, then join again.";
 
     public const string EngineRefusalMessage = "This peer runs a different s&box engine build from the host's. Update s&box to the same version on both computers and reconnect.";
 

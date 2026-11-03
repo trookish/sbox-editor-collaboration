@@ -61,11 +61,16 @@ public sealed record SetupResult(bool Created, string Error);
 /// </summary>
 public static class CollaborationSetup
 {
-    public static SetupResult EnsureConfig(string path, string org, string libraryIdent, string libraryVersion)
+    public static SetupResult EnsureConfig(string path, string org, string libraryIdent, string libraryVersion, string projectIdent = null)
     {
         try
         {
             JsonObject document;
+            // A project with its own ident gets its id from it (ProjectIdentity), on every computer alike, so nothing has to be written.
+            if (!File.Exists(path) && !string.IsNullOrWhiteSpace(projectIdent))
+            {
+                return new SetupResult(false, null);
+            }
             if (File.Exists(path))
             {
                 JsonNode parsed;
@@ -106,10 +111,7 @@ public static class CollaborationSetup
                 {
                     document["LibraryVersion"] = libraryVersion.Trim();
                 }
-                // Every admission gate starts ON. A person can relax one by editing the file; nothing here ever does.
-                document["RequireSteamFriend"] = true;
-                document["RequireOrgMember"] = true;
-                document["RequirePublished"] = true;
+                // The admission gates are not written: a missing flag is ON in code (CollaborationConfig), and a person relaxes one by adding it.
             }
             Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path)));
             string temp = path + ".tmp";

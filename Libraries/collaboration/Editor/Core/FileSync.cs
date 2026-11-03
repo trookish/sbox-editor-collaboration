@@ -199,7 +199,7 @@ public static class FileJoinPlan
         var differing = readiness.Differences.Where( x => x.Kind != FileDifferenceKind.Extra ).ToList();
         var code = differing.Where( x => x.FileKind == ProjectFileKind.Code ).Select( x => x.Path ).ToList();
         string codeNotice = code.Count == 0 ? null
-            : $"Your code differs from the host's in {code.Count} file(s), for example {string.Join( ", ", code.Take( 3 ) )}. Update it through Git. Scenes and assets are synchronized automatically.";
+            : $"Your code differs from the host's in {code.Count} file(s), for example {string.Join( ", ", code.Take( 3 ) )}. Review the host's code in the Code card to copy it. Scenes and assets are synchronized automatically.";
         var fetch = new List<FileIndexEntry>();
         foreach ( var difference in differing.Where( x => x.FileKind == ProjectFileKind.Asset ) )
         {

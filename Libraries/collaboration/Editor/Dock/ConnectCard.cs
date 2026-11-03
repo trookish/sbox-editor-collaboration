@@ -7,6 +7,9 @@ namespace TeamCreate;
 
 public sealed class ConnectCard : DockCard
 {
+    // Static, so closing and reopening the dock does not copy the same code over whatever the person copied since.
+    private static string lastCopiedCode;
+
     private const string HealthyPlayModeStatus = "Source collaboration";
 
     private const string PreparingIdentityText = "Preparing identity… waiting for a fresh Steam identity token; the session starts as soon as it arrives.";
@@ -293,6 +296,19 @@ public sealed class ConnectCard : DockCard
         if (flag3 && !string.Equals(hostCode.Text, publishedCode, StringComparison.Ordinal))
         {
             hostCode.Text = publishedCode;
+        }
+        // The invite is on the clipboard the moment hosting starts, once per code, so it only has to be pasted to a friend.
+        if (flag3 && InviteCopyRules.ShouldCopy(publishedCode, lastCopiedCode))
+        {
+            lastCopiedCode = publishedCode;
+            try
+            {
+                EditorUtility.Clipboard.Copy(publishedCode);
+                CollaborationSession.ShowToast(InviteCopyRules.Toast, string.Empty, Theme.Primary, 6f);
+            }
+            catch (Exception)
+            {
+            }
         }
         DockCard.SetText(notice, BuildNotice(current, invite.Text));
         if (current.Error != null)
