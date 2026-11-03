@@ -132,6 +132,31 @@ static class HostIsolationTests
         PeerIdTheftAsync( assert ).GetAwaiter().GetResult();
         UnrelayablePresenceAsync( assert ).GetAwaiter().GetResult();
         OversizedFirstFrameAsync( assert ).GetAwaiter().GetResult();
+        HostStallAsync( assert ).GetAwaiter().GetResult();
+    }
+
+    // A host that stalls (a hotload, a long save) must not mistake members that kept talking for silent ones: silence is counted from the
+    // last frame the connection read, not the last one the host got round to handling. A member that really is silent is still removed.
+    private static async Task HostStallAsync( Action<bool, string> assert )
+    {
+        using var rig = new Rig();
+        rig.Server.SilenceLimit = TimeSpan.FromSeconds( 1 );
+        var talker = await JoinAsync( rig, Hello( AccountA ) );
+        var quiet = await JoinAsync( rig, Hello( AccountB ) );
+        assert( Welcomed( talker.Seen ) && Welcomed( quiet.Seen ), "isolation_stall_setup_both_guests_are_admitted" );
+
+        // The host does not pump for twice the silence limit; one guest keeps pinging throughout, the other says nothing.
+        var stalled = DateTime.UtcNow.AddSeconds( 2 );
+        while ( DateTime.UtcNow < stalled )
+        {
+            talker.Wire.Send( new Packet { Kind = "ping" } );
+            await Task.Delay( 100 );
+        }
+        await rig.PumpUntilAsync( () => quiet.Wire.Failure != null, 3, talker, quiet );
+        assert( talker.Wire.Failure == null && !talker.Seen.Any( p => p.Kind == "fatal" ), "isolation_a_member_that_kept_talking_through_a_host_stall_is_kept" );
+        assert( await StillServedAsync( rig, talker.Wire, talker.Seen ), "isolation_after_a_host_stall_the_talking_member_is_still_served" );
+        assert( quiet.Wire.Failure != null, "isolation_a_member_that_was_really_silent_is_still_removed" );
+        assert( rig.PumpError == null, $"isolation_a_host_stall_never_escapes_the_host_pump: {rig.PumpError?.Message}" );
     }
 
     // A guest that disconnects while its identity is still being checked used to stay queued; when the check finished, the welcome went to a

@@ -506,6 +506,20 @@ public static class StateRules
             && state.Data["__guid"] is JsonValue guid && guid.TryGetValue( out string text ) && string.Equals( text, id, StringComparison.Ordinal );
     }
 
+    /// <summary>
+    /// Why one object in the first copy of a scene (a subscribe seed) may not be kept, or null when it may. The same structural rules as
+    /// an edit's state: the host keeps the seed and hands it to everyone who opens the scene later, so it must be something they can take.
+    /// Identity is not required here; a scene's first copy is taken as the editor has it.
+    /// </summary>
+    public static string RefusalOfSeed( ObjectState state )
+    {
+        if ( (object)state == null || state.Data is null )
+        {
+            return "An object in it has no data.";
+        }
+        return RefusalOfState( state );
+    }
+
     // The structural rules on one state that is about to be sent. The tree walk comes first: it bounds the depth, so the
     // serialisation that measures the size cannot fail on a payload nested too deep to write.
     private static string RefusalOfState( ObjectState state )
@@ -601,6 +615,12 @@ public static class StateRules
             }
             return null;
         }
+        // JSON has no infinity, yet 1e999 is valid JSON text and reads as one. An editor that applied it would put an object at infinity, so
+        // it is refused here, with every other structural rule, before anyone holds or relays it.
+        if ( node is JsonValue number && !IsFinite( number ) )
+        {
+            return "contains a number that is not finite and was not sent.";
+        }
         if ( node is JsonValue value && value.TryGetValue( out string text ) && System.Text.Encoding.UTF8.GetByteCount( text ) > MaxStringBytes )
         {
             // Geometry is moved out of the state before it gets here (BlobRules.Externalize); what is still inline is over the 32 MiB
@@ -612,6 +632,26 @@ public static class StateRules
             return "contains a text value larger than the " + MaxStringBytes / 1024 + " KiB collaboration limit and was not sent.";
         }
         return null;
+    }
+
+    // True for anything that is not a number. A number read from JSON text is held as an element and is finite only when it reads as a
+    // finite double; one built in code is held as its own type, and only a double or a float can be anything but finite (an int, a long
+    // or a decimal always is). Nothing here serialises the value, which would throw on the very numbers it looks for.
+    private static bool IsFinite( JsonValue number )
+    {
+        if ( number.TryGetValue( out System.Text.Json.JsonElement element ) )
+        {
+            return element.ValueKind != System.Text.Json.JsonValueKind.Number || ( element.TryGetDouble( out double read ) && double.IsFinite( read ) );
+        }
+        if ( number.TryGetValue( out double real ) )
+        {
+            return double.IsFinite( real );
+        }
+        if ( number.TryGetValue( out float single ) )
+        {
+            return float.IsFinite( single );
+        }
+        return true;
     }
 
     private static string DepthRefusal() => "is nested more than " + MaxDataDepth + " levels deep, beyond the collaboration limit, and was not sent.";
@@ -821,6 +861,20 @@ public sealed class Authority
     {
         if (!Scenes.ContainsKey(p.Scene))
         {
+            // Checked before anything is kept: a refused first copy leaves the scene unshared, and its sender alone is told why.
+            foreach (ObjectState state in p.Objects ?? new List<ObjectState>())
+            {
+                string refusal = StateRules.RefusalOfSeed(state);
+                if (refusal != null)
+                {
+                    return new Packet
+                    {
+                        Kind = "reject",
+                        Id = p.Id,
+                        Error = "The scene " + p.Scene + " could not be shared. " + refusal
+                    };
+                }
+            }
             Dictionary<string, ObjectState> dictionary = StateRules.Map(p.Objects);
             StateRules.ValidateGraph(dictionary);
             persist(new Packet
