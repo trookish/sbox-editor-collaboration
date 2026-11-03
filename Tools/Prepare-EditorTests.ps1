@@ -1,5 +1,18 @@
-param([string]$SboxRoot='C:\Program Files (x86)\Steam\steamapps\common\sbox')
+param([string]$SboxRoot='C:\Program Files (x86)\Steam\steamapps\common\sbox',[switch]$Stop)
 $ErrorActionPreference='Stop'
+$stopRoot=Join-Path ([IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))) '.collaboration/test-copies'
+if($Stop) {
+    # Closes only the editors this script started, by the process ids it recorded; an editor the person opened is never touched.
+    foreach($copyName in @('A','B')) {
+        $pidFile=Join-Path $stopRoot "$copyName/.collaboration/editor.pid"
+        if(!(Test-Path -LiteralPath $pidFile)) {continue}
+        $id=[int](Get-Content -LiteralPath $pidFile -Raw).Trim()
+        $process=Get-Process -Id $id -ErrorAction SilentlyContinue
+        if($process -and $process.ProcessName -eq 'sbox-dev') { Stop-Process -Id $id -Force; Write-Host "Closed editor $copyName (PID $id)" }
+        Remove-Item -LiteralPath $pidFile -Force
+    }
+    return
+}
 # Windows PowerShell 5.1 has no [IO.Path]::GetRelativePath (added in .NET Core 2.1).
 # This shim keeps the fixture copy working on the 5.1 runtime that ships with Windows.
 if(-not ('CollabPath' -as [type])) {
@@ -39,6 +52,8 @@ foreach($copyName in @('A','B')) {
     }
     Copy-Item -LiteralPath (Join-Path $workspace 'Collab_Library_Testing.sbproj') -Destination $copyRoot -Force
     foreach($subdir in @('Editor','.collaboration')) { New-Item -ItemType Directory -Force (Join-Path $copyRoot $subdir) | Out-Null }
+    # Marks the folder as a disposable copy (TestHarnessRules.MarkerFile), which the session checks before it treats the copy as a test fixture.
+    Set-Content -LiteralPath (Join-Path $copyRoot '.collaboration/disposable-test-copy.txt') -Value 'Disposable two-editor test copy made by Tools/Prepare-EditorTests.ps1. Safe to delete.'
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'EditorProbe.cs') -Destination (Join-Path $copyRoot 'Editor/EditorProbe.cs') -Force
     Copy-Item -LiteralPath (Join-Path $workspace 'Assets/scenes/minimal.scene') -Destination (Join-Path $copyRoot 'Assets/scenes/secondary.scene') -Force
 }

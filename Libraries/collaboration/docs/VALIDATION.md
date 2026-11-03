@@ -381,3 +381,50 @@ The supplied artwork is stored once at `Libraries/collaboration/docs/icon.png` (
 The `Libraries/collaboration/` folder, and with it this document, was accidentally deleted on 2026-09-29. The text above was reconstructed afterwards from the evidence that survived the deletion: the task specifications under `.hermes/tasks/` and the overhaul plan under `.hermes/plans/`; the full-file reads of this document kept in the session record, replayed against the exact unified diffs produced by every later patch to it; and the `file_size` and `total_lines` those reads reported, used as checkpoints.
 
 The reconstruction was byte-checked against the recorded size of this file at 2026-09-29 05:33 (168 lines, 30994 bytes) before the two final patches of that pass were replayed. Nothing above has been re-run since the deletion: every entry reports work performed before 2026-09-29, no entry that was not run has been promoted to a passing result, and no continuity between the deleted file and this reconstruction is claimed beyond that byte-level check.
+
+## Two-PC protocol
+
+A manual check on two computers with two Steam accounts, run before each release and after any change to transport, admission, files or recovery. The automated gates (Tools/CoreTests, Tools/RelayTests, the Worker test and the engine compile) cannot prove these steps. Record the date, both s&box builds and the library version above the table; in *Actions taken*, write what you did that the step did not ask for (a restart, a retry, a setting changed). Any entry there is a defect in the tool, even when the step passed.
+
+| # | Area | Step | Expected result | Result | Actions taken |
+|---|---|---|---|---|---|
+| 1 | Setup | Host: install the library in a project with a `.gitignore`, open the editor. | The Collaboration dock opens by itself. |  |  |
+| 2 | Setup | Host: press Host. | Hosting starts; the toast "Invite copied. Send it to your collaborators." appears and the invite is on the clipboard; `.collaboration/` is added to `.gitignore` with a notice. |  |  |
+| 3 | Setup | Guest: open the same project (no settings file copied), paste the invite, press Join. | Joined in 30 s or less; the guest's files are brought up to date without a manual copy. |  |  |
+| 4 | Setup | Guest: open Files changed this session. | Every file and code file the host sent is listed, code marked as received from the host. |  |  |
+| 5 | Editing | Host: move an object. | The guest sees the move within one second, without stutter. |  |  |
+| 6 | Editing | Guest: move a different object at the same time. | Both moves land on both computers. |  |  |
+| 7 | Editing | Guest: rename an object. | The new name appears on the host. |  |  |
+| 8 | Editing | Host: add a component and change one of its properties. | The component and value appear on the guest. |  |  |
+| 9 | Editing | Guest: delete an object. | It disappears on the host; nothing else changes. |  |  |
+| 10 | Editing | Host: create a prefab instance. | It appears on the guest with the same children. |  |  |
+| 11 | Undo | Guest: undo the delete (Ctrl+Z). | The object returns on both computers. |  |  |
+| 12 | Undo | Guest: redo (Ctrl+Y). | It is removed again on both. |  |  |
+| 13 | Undo | Host: make 50 small edits, then undo all 50. | Every step undoes in order on both computers. |  |  |
+| 14 | Conflict | Both: drag the same object at the same moment. | One owner wins; the other sees a clear notice; no object is lost or duplicated. |  |  |
+| 15 | Conflict | Host: lock an object; guest tries to edit it. | The guest's edit is refused with a message naming the object. |  |  |
+| 16 | Save | Host: save the scene (Ctrl+S). | No freeze on either side; no "saved outside the session" warning. |  |  |
+| 17 | Save | Guest: save. | The save is accepted; disk and session agree. |  |  |
+| 18 | Save | Edit the open scene file in another program while edits are in flight. | A warning names the recovery copy of the saved file. |  |  |
+| 19 | Files | Guest: add a texture to Assets. | It arrives on the host. |  |  |
+| 20 | Files | Open a synchronized file in another program that locks it, then change it. | A single notice says the file is open elsewhere; it is sent once released. |  |  |
+| 21 | Files | Guest: delete a folder of assets. | Every file in it is removed on the host. |  |  |
+| 22 | Code | Host: change a C# file. | The guest's Code card lists the change; accepting it writes the host's code to the guest's project. |  |  |
+| 23 | Network | Pull the guest's network cable for 10 s, then reconnect. | The guest reconnects by itself; no edits are lost. |  |  |
+| 24 | Network | Pull it for 60 s. | The guest reconnects by itself within 30 s of the cable returning. |  |  |
+| 25 | Network | Guest: unsaved scene changes, then drop the network. | One notice asks to save before the automatic reconnect continues. |  |  |
+| 26 | Network | Put the guest's PC to sleep for 2 minutes, then wake it. | The guest reconnects or explains why it cannot, without a crash. |  |  |
+| 27 | Network | Join over the relay instead of the LAN (Relay mode). | Join works with no port forwarding. |  |  |
+| 28 | Isolation | Suspend the guest's editor for 30 s (Task Manager, Resource Monitor → Suspend process), then resume it. | The host and any other guest keep editing throughout; the suspended guest is dropped and reconnects by itself after resuming. |  |  |
+| 29 | Isolation | Kill the guest's editor from Task Manager. | The host keeps running; the guest's presence disappears within the timeout. |  |  |
+| 30 | Hotload | Host: trigger a code hotload while the guest edits. | The session survives the hotload on both sides. |  |  |
+| 31 | Play | Host: enter play mode. | The guest is told play started; edits pause and resume afterwards. |  |  |
+| 32 | Play | Host: leave play mode. | Scene state returns to the pre-play edit state on both sides. |  |  |
+| 33 | Leave | Guest: press Leave, then Join again. | The rejoin succeeds in 30 s or less with the current scene. |  |  |
+| 34 | Leave | Host: press Leave while the guest is connected. | The guest is told the host ended the session; nothing on the guest's disk is damaged. |  |  |
+| 35 | Leave | Host: host again; guest rejoins. | Everything resumes; the guest's earlier work is on both computers. |  |  |
+| 36 | Admission | A third account that is not a Steam friend tries to join. | It is refused with a message naming the reason. |  |  |
+| 37 | Admission | Four people join (cap). | The fifth is refused as full; the four keep working. |  |  |
+| 38 | Awareness | Each person selects an object. | Every other person sees who selected what. |  |  |
+| 39 | Soak | Keep two people editing for 4 hours. | No disconnects that do not recover, no growing memory, no slowdown below 20 Hz. |  |  |
+| 40 | Soak | After the soak, both close and reopen the project. | Both scenes open identically from disk. |  |  |

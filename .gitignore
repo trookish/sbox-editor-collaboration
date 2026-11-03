@@ -16,6 +16,7 @@
 !/PUBLISHING.md
 !/LICENSE
 !/.gitignore
+!/.github
 
 # Auto-generated code editor files (at any depth)
 .vs/

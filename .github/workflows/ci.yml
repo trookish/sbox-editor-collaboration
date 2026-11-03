@@ -1,0 +1,63 @@
+# Runs every engine-free gate on each push and pull request to main: the library core tests, the relay tests, and the Cloudflare
+# Worker's wire-contract test against a local `wrangler dev`. The engine compile gate (Tools/Compile) needs an s&box install and is run
+# by the pre-push hook on a developer machine instead (Tools/hooks/pre-push).
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Core tests
+        run: dotnet run --project Tools/CoreTests/CoreTests.csproj -c Release
+
+      - name: Relay tests
+        run: dotnet run --project Tools/RelayTests/RelayTests.csproj -c Release
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: Tools/RelayWorker/package-lock.json
+
+      - name: Install the Worker's tools
+        working-directory: Tools/RelayWorker
+        run: npm ci
+
+      - name: Worker wire-contract test
+        working-directory: Tools/RelayWorker
+        shell: pwsh
+        run: |
+          $port = 18787
+          $server = Start-Process -FilePath npx.cmd -ArgumentList @('wrangler','dev','--local','--ip','127.0.0.1','--port',"$port",'--inspector-port','19229') -PassThru -NoNewWindow
+          try {
+            $ready = $false
+            for ($i = 0; $i -lt 60 -and -not $ready; $i++) {
+              try { $ready = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 "http://127.0.0.1:$port/health").StatusCode -eq 200 } catch { Start-Sleep -Seconds 2 }
+            }
+            if (-not $ready) { throw "wrangler dev did not answer on port $port." }
+            npm test -- "ws://127.0.0.1:$port/relay"
+            if ($LASTEXITCODE -ne 0) { throw "The Worker's wire-contract test failed." }
+          }
+          finally {
+            Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
+          }

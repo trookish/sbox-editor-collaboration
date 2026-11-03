@@ -44,6 +44,10 @@ The library version is stated in three places that must agree - the test suite f
 
 A consuming project also pins the version in its `ProjectSettings/collaboration.json` (`LibraryVersion`); the same test checks that pin wherever a project is present.
 
+`powershell -File Tools/Bump-Version.ps1 1.3.0` updates all of them, including that pin, in one step. Run the core tests afterwards.
+
+Once per clone, `powershell -File Tools/Install-Hooks.ps1` turns on the pre-push hook, which runs the compile gate (when s&box is installed) and the core tests before each push. CI (`.github/workflows/ci.yml`) runs the core, relay and Worker tests on every push and pull request to `main`.
+
 ### 4. Confirm the test project state
 
 `ProjectSettings/collaboration.json` in this repository's development project should name the version you are releasing. The library itself does not depend on that file, but keeping it current keeps the readiness checks honest while you test.

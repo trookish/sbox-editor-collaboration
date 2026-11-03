@@ -1,0 +1,34 @@
+#!/bin/sh
+# Runs the library's gates before a push, so a broken build never reaches the shared branch.
+# Installed by Tools/Install-Hooks.ps1 (git config core.hooksPath Tools/hooks). Skip once with: git push --no-verify
+#
+# The engine compile gate needs s&box; when it is not installed the gate is skipped with a warning and the engine-free tests still run.
+# Set SBOX_ROOT to use an install outside the default Steam library.
+
+root=$(git rev-parse --show-toplevel) || exit 1
+cd "$root" || exit 1
+
+sbox_root=${SBOX_ROOT:-"C:/Program Files (x86)/Steam/steamapps/common/sbox"}
+
+fail() {
+    echo "pre-push: $1 The push was stopped; fix it, or push with --no-verify to skip the checks." >&2
+    exit 1
+}
+
+if [ -f "$sbox_root/bin/managed/Sandbox.Tools.dll" ]; then
+    echo "pre-push: compiling the library against s&box..."
+    dotnet build Tools/Compile/Compile.csproj -v q --nologo "-p:SboxRoot=$sbox_root" >/dev/null 2>&1 || fail "The library does not compile against s&box (dotnet build Tools/Compile/Compile.csproj)."
+else
+    echo "pre-push: warning: s&box was not found at $sbox_root, so the engine compile gate was skipped." >&2
+fi
+
+echo "pre-push: running the core tests..."
+log=$(dotnet run --project Tools/CoreTests/CoreTests.csproj 2>&1)
+status=$?
+summary=$(printf '%s\n' "$log" | grep -E 'tests passed$' | tail -n 1)
+if [ $status -ne 0 ] || [ -z "$summary" ]; then
+    printf '%s\n' "$log" | tail -n 20 >&2
+    fail "The core tests failed (dotnet run --project Tools/CoreTests/CoreTests.csproj)."
+fi
+echo "pre-push: $summary"
+exit 0
