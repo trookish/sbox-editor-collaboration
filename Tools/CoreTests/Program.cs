@@ -5474,13 +5474,12 @@ Assert( AutoRecoveryRules.Classify( null ) == SessionFailureClass.Terminal &&
     default( SessionFailureClass ) == SessionFailureClass.Terminal,
     "a failure with no exception behind it fails closed" );
 
-// The backoff between attempts: one second, then four, then ten, so a host that is
-// restarting is given a chance to come back before the last attempt is spent.
+// The backoff between attempts (the full schedule is in Sections/AutoRecoveryDefaultsTests.cs).
 Assert( AutoRecoveryRules.Backoff( 0 ) == TimeSpan.FromSeconds( 1 ) &&
-    AutoRecoveryRules.Backoff( 1 ) == TimeSpan.FromSeconds( 4 ) &&
-    AutoRecoveryRules.Backoff( 2 ) == TimeSpan.FromSeconds( 10 ) &&
-    AutoRecoveryRules.Backoff( 3 ) == TimeSpan.FromSeconds( 10 ),
-    "attempts back off at one second, four seconds and ten seconds" );
+    AutoRecoveryRules.Backoff( 1 ) == TimeSpan.FromSeconds( 2 ) &&
+    AutoRecoveryRules.Backoff( 2 ) == TimeSpan.FromSeconds( 4 ) &&
+    AutoRecoveryRules.Backoff( 3 ) == TimeSpan.FromSeconds( 8 ),
+    "attempts back off at one, two, four and eight seconds" );
 
 // What a silent retry must never do, decided from injected facts rather than engine state.
 AutoRecoveryInput TAutoRecover( bool enabled = true, SessionFailureClass failureClass = SessionFailureClass.Transient,
@@ -5515,12 +5514,8 @@ Assert( !AutoRecoveryRules.Eligible( TAutoRecover( attemptsUsed: 1, now: tAutoRe
 Assert( AutoRecoveryRules.Eligible( TAutoRecover( attemptsUsed: 1, now: tAutoRecoverNow.AddSeconds( 4 ),
         nextAttemptAt: tAutoRecoverNow.AddSeconds( 1 ) ) ),
     "an attempt whose backoff has elapsed is eligible again" );
-Assert( AutoRecoveryRules.Eligible( TAutoRecover( attemptsUsed: AutoRecoveryRules.MaxAttempts - 1 ) ),
-    "the last attempt of the budget is still spent" );
-Assert( !AutoRecoveryRules.Eligible( TAutoRecover( attemptsUsed: AutoRecoveryRules.MaxAttempts ) ),
-    "the attempt budget is three, and the third refusal is the end of it" );
-Assert( !AutoRecoveryRules.Eligible( TAutoRecover( attemptsUsed: AutoRecoveryRules.MaxAttempts + 1 ) ),
-    "a spent budget can never become eligible again" );
+Assert( AutoRecoveryRules.Eligible( TAutoRecover( attemptsUsed: 3 ) ) && AutoRecoveryRules.Eligible( TAutoRecover( attemptsUsed: 1000 ) ),
+    "there is no attempt budget: recovery keeps trying while the editor is open" );
 
 // The prompt that stands in for a retry while the toggle is off: exactly one per outage,
 // only for a transient failure, and only when the action it names would be accepted.

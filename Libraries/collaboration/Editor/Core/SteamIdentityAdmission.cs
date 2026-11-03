@@ -8,6 +8,9 @@ public static class SteamIdentityAdmission
 {
     public const string TokenRejectedMessage = "This peer's Steam identity token was rejected.";
 
+    /// <summary>The refusal of an account the host still holds a connection for. It passes once that connection times out.</summary>
+    public const string DuplicateAccountError = "That Steam account is already connected to this session.";
+
     public static string GetDuplicateError(string joiningSteamId, IEnumerable<string> existingSteamIds)
     {
         if (!SteamIdentityRules.TryParse(joiningSteamId, out var identity))
@@ -20,7 +23,7 @@ public static class SteamIdentityAdmission
             {
                 continue;
             }
-            return "That Steam account is already connected to this session.";
+            return DuplicateAccountError;
         }
         return null;
     }

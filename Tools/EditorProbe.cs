@@ -280,7 +280,7 @@ public static class CollaborationProbe
                             {
                                 new[] { "Connection lost", "Select Recover & reconnect, or press CTRL+ALT+R, to restore this session." },
                                 new[] { "Connection restored", "Automatic recovery reconnected this session." },
-                                new[] { "Automatic recovery stopped", "Three automatic attempts did not reconnect this session." }
+                                new[] { "Automatic recovery stopped", "This editor session remains fail-stop; automatic recovery cannot continue." }
                             } )
                             {
                                 ToastManager.Remove( new ToastWidget

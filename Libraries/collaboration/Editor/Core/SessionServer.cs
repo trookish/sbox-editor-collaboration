@@ -76,6 +76,9 @@ public sealed partial class SessionServer : IDisposable
 
     public const int MaxPendingVerifications = 8;
 
+    /// <summary>The refusal of a hello while the host is already verifying <see cref="MaxPendingVerifications"/> others. It passes.</summary>
+    public const string VerificationBusyError = "Too many peers are awaiting identity verification";
+
     /// <summary>Messages from one member the host could not process before it closes that member's connection. A correct editor sends none.</summary>
     public const int MaxProtocolErrors = 16;
 
@@ -259,7 +262,7 @@ public sealed partial class SessionServer : IDisposable
                         {
                             if (!TryDeferVerification(m, p))
                             {
-                                RejectWith(m, "fatal", "Too many peers are awaiting identity verification");
+                                RejectWith(m, "fatal", VerificationBusyError);
                             }
                             continue;
                         }

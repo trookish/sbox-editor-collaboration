@@ -88,9 +88,6 @@ public sealed class Wire : IDisposable
     {
     }
 
-    // The framing, encryption and sequencing all live above this constructor and see only a byte
-    // stream, so a TCP socket and a relay-carried pipe are interchangeable. `owner` is what closes the
-    // underlying resource (the TcpClient, or the relay socket); when it is null the stream closes itself.
     /// <summary>Largest frame a peer may send before its first packet has arrived. A hello is a few hundred bytes, so a connection that has not
     /// said who it is never makes the host reserve a full-size frame for it.</summary>
     public const int FirstFrameLimit = 256 * 1024;

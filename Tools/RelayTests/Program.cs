@@ -246,9 +246,10 @@ var fastBackoff = new[] { TimeSpan.FromMilliseconds( 60 ) };
     catch ( RelayRefusedException ex ) { refused = ex; }
     Assert( refused != null && refused.Code == "no-host" && refused.Message.Contains( "not connected to the relay" ),
         "a guest arriving before the host is told, in plain words, that the host is not connected" );
-    Assert( AutoRecoveryRules.Classify( refused ) == SessionFailureClass.Terminal
+    Assert( AutoRecoveryRules.Classify( refused ) == SessionFailureClass.Transient
+        && AutoRecoveryRules.Classify( new RelayRefusedException( "bad-proof", "refused" ) ) == SessionFailureClass.Terminal
         && AutoRecoveryRules.Classify( new IOException( "The relay closed the connection." ) ) == SessionFailureClass.Transient,
-        "a relay refusal is terminal for automatic recovery while a dropped relay connection stays retryable" );
+        "a host not yet back on the relay is retried, a refused code is not, and a dropped relay connection stays retryable" );
 
     using var host = new RelayHost( () => new ClientSocket(), url, secret, key, null, fastBackoff, anyLoopbackPort: true );
     host.Start();

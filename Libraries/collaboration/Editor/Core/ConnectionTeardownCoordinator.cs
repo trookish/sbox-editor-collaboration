@@ -146,8 +146,17 @@ public sealed record AutoRecoveryInput(bool AutoRecoverEnabled, bool ErrorRecord
 
 public static class AutoRecoveryRules
 {
-    public const int MaxAttempts = 3;
+    /// <summary>A guest's dropped session reconnects by itself unless the person turned that off.</summary>
+    public const bool EnabledByDefault = true;
 
+    // Quick at first, for a blip in the network, then settling at every thirty seconds, for a host that is restarting its editor.
+    private static readonly int[] BackoffSeconds = { 1, 2, 4, 8, 15, 30 };
+
+    /// <summary>
+    /// Whether retrying can help. A dropped connection, a timeout and a relay that is momentarily without the host, full or limiting can
+    /// all pass; a key that does not match (which is also what a tampered frame looks like), a peer that does not speak the protocol and
+    /// a relay refusal of the code, the key or the version cannot, and are never retried.
+    /// </summary>
     public static SessionFailureClass Classify(Exception error)
     {
         if (error == null)
@@ -159,27 +168,37 @@ public static class AutoRecoveryRules
             Exception? innerException = ex.InnerException;
             return (innerException != null) ? Classify(innerException) : SessionFailureClass.Terminal;
         }
+        if (error is RelayRefusedException refused)
+        {
+            return RelayProtocol.IsTerminal(refused.Code) ? SessionFailureClass.Terminal : SessionFailureClass.Transient;
+        }
+        if (error is IOException && (error.Message.Contains(Wire.DecryptionFailure, StringComparison.Ordinal) || error.Message.Contains(Wire.PreambleFailure, StringComparison.Ordinal)))
+        {
+            return SessionFailureClass.Terminal;
+        }
         return (error is IOException || error is SocketException || error is TimeoutException) ? SessionFailureClass.Transient : SessionFailureClass.Terminal;
     }
 
+    /// <summary>
+    /// Whether a refusal the host sent can pass by itself: the host still holding this account's previous connection (it times out) or
+    /// being busy verifying others. Every other refusal is the host deciding, and is not retried.
+    /// </summary>
+    public static SessionFailureClass ClassifyRefusal(string? reason)
+    {
+        if (reason == null)
+        {
+            return SessionFailureClass.Terminal;
+        }
+        return (reason.Contains(SteamIdentityAdmission.DuplicateAccountError, StringComparison.Ordinal) || reason.Contains(SessionServer.VerificationBusyError, StringComparison.Ordinal))
+            ? SessionFailureClass.Transient
+            : SessionFailureClass.Terminal;
+    }
+
+    /// <summary>How long to wait after the given number of attempts. There is no budget: the attempts go on while the editor is open.</summary>
     public static TimeSpan Backoff(int attemptsUsed)
     {
-        if (1 == 0)
-        {
-        }
-        TimeSpan result;
-        if (attemptsUsed <= 0)
-        {
-            result = TimeSpan.FromSeconds(1L);
-        }
-        else
-        {
-            result = ((attemptsUsed != 1) ? TimeSpan.FromSeconds(10L) : TimeSpan.FromSeconds(4L));
-        }
-        if (1 == 0)
-        {
-        }
-        return result;
+        int index = Math.Clamp(attemptsUsed, 0, BackoffSeconds.Length - 1);
+        return TimeSpan.FromSeconds(BackoffSeconds[index]);
     }
 
     public static bool Eligible(AutoRecoveryInput input)
@@ -213,10 +232,6 @@ public static class AutoRecoveryRules
             return false;
         }
         if (input.AttemptInFlight)
-        {
-            return false;
-        }
-        if (input.AttemptsUsed >= 3)
         {
             return false;
         }

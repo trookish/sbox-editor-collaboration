@@ -100,7 +100,7 @@ public sealed class ControlsCard : DockCard
         autoRecover = Layout.Add(new Checkbox
         {
             Text = "Automatic recovery",
-            ToolTip = "Automatic recovery reloads scenes from disk; unsaved local changes are archived first. Off by default."
+            ToolTip = "Automatic recovery reloads scenes from disk; unsaved local changes are archived first. On by default."
         });
         Checkbox checkbox2 = autoRecover;
         checkbox2.Toggled = (Action)Delegate.Combine(checkbox2.Toggled, (Action)(() =>

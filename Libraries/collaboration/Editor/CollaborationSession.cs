@@ -306,7 +306,7 @@ public sealed partial class CollaborationSession : EditorEvent.ISceneView, Edito
 
     private DateTime nextAutoSaveCheck;
 
-    private bool autoRecover;
+    private bool autoRecover = AutoRecoveryRules.EnabledByDefault;
 
     private DateTime undoNoticeExpires;
 
@@ -3569,7 +3569,7 @@ public sealed partial class CollaborationSession : EditorEvent.ISceneView, Edito
             }
             if (p.Kind == "reject" && p.Scene == null)
             {
-                Fail(text);
+                Fail(text, AutoRecoveryRules.ClassifyRefusal(p.Error));
                 return;
             }
             if (restoring && p.Kind == "reject")
@@ -3578,7 +3578,7 @@ public sealed partial class CollaborationSession : EditorEvent.ISceneView, Edito
             }
             else if (p.Kind == "fatal")
             {
-                Fail(text);
+                Fail(text, AutoRecoveryRules.ClassifyRefusal(p.Error));
             }
             if (p.Kind == "reject")
             {
@@ -4157,11 +4157,6 @@ public sealed partial class CollaborationSession : EditorEvent.ISceneView, Edito
                 {
                     return;
                 }
-                if (recoverAttempts >= 3)
-                {
-                    DeclineAutoRecover("Three automatic attempts did not reconnect this session.");
-                    return;
-                }
                 bool isHost = IsHost;
                 bool flag4 = !isHost && HasUnsavedTrackedChanges();
                 bool flag5 = reconnectQueued || reconnectTokenTask != null || connecting != null;
@@ -4171,6 +4166,12 @@ public sealed partial class CollaborationSession : EditorEvent.ISceneView, Edito
                 }
                 else
                 {
+                    if (flag4 && !recoverPromptShown)
+                    {
+                        // Recovery reloads scenes from the host, so it waits for unsaved work to be saved. Say so once, or the wait looks like nothing.
+                        recoverPromptShown = true;
+                        ShowToast("Connection lost", "Save your scenes to reconnect automatically, or select Recover & reconnect to archive the unsaved changes and reconnect now.", Theme.Primary, 15f);
+                    }
                     if (flag4 | flag5)
                     {
                         return;
@@ -4185,7 +4186,10 @@ public sealed partial class CollaborationSession : EditorEvent.ISceneView, Edito
                     bool reconnectAccepted = RecoveryOffered();
                     if (AutoRecoveryRules.Eligible(new AutoRecoveryInput(AutoRecover, Error != null, errorClass, flag2, isHost, flag4, reconnectAccepted, flag5, recoverAttempts, DateTime.UtcNow, recoverNextAttempt)))
                     {
-                        recoverAttempts++;
+                        if (recoverAttempts < int.MaxValue)
+                        {
+                            recoverAttempts++;
+                        }
                         recoverArmed = true;
                         recoverNextAttempt = DateTime.UtcNow.Add(AutoRecoveryRules.Backoff(recoverAttempts - 1));
                         try
